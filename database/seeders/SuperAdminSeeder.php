@@ -17,6 +17,7 @@ class SuperAdminSeeder extends Seeder
             ['email' => 'admin@gmail.com'],
             [
                 'name' => 'Admin',
+                'phone' => '1234567890',
                 'password' => Hash::make('admin@123'),
                 'role' => 'Admin',
                 'status' => 'active',

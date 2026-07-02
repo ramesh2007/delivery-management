@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Auth\LoginRequest;
+use App\Http\Requests\Auth\ChangePasswordRequest;
 use App\Services\AuthService;
 use App\Helpers\ApiResponse;
 use Illuminate\Http\Request;
@@ -65,6 +66,24 @@ class AuthController extends Controller
         } catch (Exception $e) {
             Log::error('Logout Error: ' . $e->getMessage());
             return $this->errorResponse('An error occurred during logout', 500);
+        }
+    }
+
+    /**
+     * Handle user change password.
+     *
+     * @param ChangePasswordRequest $request
+     * @return JsonResponse
+     */
+    public function changePassword(ChangePasswordRequest $request): JsonResponse
+    {
+        try {
+            $this->authService->changePassword($request->user(), $request->validated('new_password'));
+
+            return $this->successResponse('Password changed successfully');
+        } catch (Exception $e) {
+            Log::error('Change Password Error: ' . $e->getMessage());
+            return $this->errorResponse('An error occurred while changing password', 500);
         }
     }
 }

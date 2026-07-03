@@ -86,4 +86,20 @@ class AuthController extends Controller
             return $this->errorResponse('An error occurred while changing password', 500);
         }
     }
+
+    /**
+     * Get the authenticated user's profile.
+     *
+     * @param Request $request
+     * @return JsonResponse
+     */
+    public function profile(Request $request): JsonResponse
+    {
+        try {
+            return $this->successResponse('User profile retrieved successfully', $request->user());
+        } catch (Exception $e) {
+            Log::error('Profile Error: ' . $e->getMessage());
+            return $this->errorResponse('An error occurred while retrieving profile', 500);
+        }
+    }
 }

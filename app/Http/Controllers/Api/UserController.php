@@ -135,4 +135,32 @@ class UserController extends Controller
             return $this->errorResponse('Failed to delete user', 500);
         }
     }
+
+    /**
+     * Display a listing of active users.
+     */
+    public function activeUsers(): JsonResponse
+    {
+        try {
+            $users = User::where('status', 'active')->get();
+            return $this->successResponse('Active users retrieved successfully', $users);
+        } catch (Exception $e) {
+            Log::error('Fetch Active Users Error: ' . $e->getMessage());
+            return $this->errorResponse('Failed to retrieve active users', 500);
+        }
+    }
+
+    /**
+     * Display a listing of inactive users.
+     */
+    public function inactiveUsers(): JsonResponse
+    {
+        try {
+            $users = User::where('status', 'inactive')->get();
+            return $this->successResponse('Inactive users retrieved successfully', $users);
+        } catch (Exception $e) {
+            Log::error('Fetch Inactive Users Error: ' . $e->getMessage());
+            return $this->errorResponse('Failed to retrieve inactive users', 500);
+        }
+    }
 }

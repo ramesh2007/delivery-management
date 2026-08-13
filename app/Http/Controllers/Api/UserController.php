@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\User;
+use App\Models\Role;
 use App\Helpers\ApiResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
@@ -40,21 +41,44 @@ class UserController extends Controller
                 'name' => ['required', 'string', 'max:255'],
                 'email' => ['required', 'string', 'email', 'max:255', 'unique:users,email'],
                 'phone' => ['nullable', 'string', 'max:20'],
-                'password' => ['required', 'string', 'min:8'], // Postman doesn't always send confirmed well, I removed it for simplicity if they just send 'password'
-                'role' => ['nullable', 'string', 'in:Admin,user'],
+                'password' => ['required', 'string', 'min:8'],
+                'role' => ['nullable', 'string', 'exists:roles,name'],
+                'roles' => ['nullable', 'array'],
                 'status' => ['nullable', 'string', 'in:active,inactive'],
             ]);
 
             $data['password'] = Hash::make($data['password']);
             
-            $user = User::create($data);
-            
-            return $this->successResponse('User created successfully', $user, 201);
+            $user = User::create([
+                'name' => $data['name'],
+                'email' => $data['email'],
+                'phone' => $data['phone'] ?? null,
+                'password' => $data['password'],
+                'status' => $data['status'] ?? 'active',
+            ]);
+
+            if (!empty($data['roles'])) {
+                $this->syncRoles($user, $data['roles']);
+            } elseif (!empty($data['role'])) {
+                $this->syncRoles($user, $data['role']);
+            }
+
+            $token = $user->createToken('auth_token')->plainTextToken;
+
+            return response()->json([
+                'message' => 'User created successfully',
+                'user' => $user->load('roles'),
+                'token_type' => 'Bearer',
+                'access_token' => $token,
+            ], 201);
         } catch (\Illuminate\Validation\ValidationException $e) {
-            return $this->errorResponse($e->getMessage(), 422);
+            return response()->json([
+                'message' => $e->getMessage(),
+                'errors' => $e->errors(),
+            ], 422);
         } catch (Exception $e) {
             Log::error('Create User Error: ' . $e->getMessage());
-            return $this->errorResponse('Failed to create user', 500);
+            return $this->errorResponse('Failed to create user: ' . $e->getMessage(), 500);
         }
     }
 
@@ -64,7 +88,7 @@ class UserController extends Controller
     public function show(int $id): JsonResponse
     {
         try {
-            $user = User::find($id);
+            $user = User::with('roles')->find($id);
 
             if (!$user) {
                 return $this->errorResponse('User not found', 404);
@@ -94,7 +118,8 @@ class UserController extends Controller
                 'email' => ['sometimes', 'string', 'email', 'max:255', Rule::unique('users')->ignore($user->id)],
                 'phone' => ['nullable', 'string', 'max:20'],
                 'password' => ['nullable', 'string', 'min:8'],
-                'role' => ['sometimes', 'string', 'in:Admin,user'],
+                'role' => ['nullable', 'string', 'exists:roles,name'],
+                'roles' => ['nullable', 'array'],
                 'status' => ['sometimes', 'string', 'in:active,inactive'],
             ]);
             
@@ -105,10 +130,19 @@ class UserController extends Controller
             }
 
             $user->update($data);
+
+            if (isset($data['roles'])) {
+                $this->syncRoles($user, $data['roles']);
+            } elseif (isset($data['role'])) {
+                $this->syncRoles($user, $data['role']);
+            }
             
-            return $this->successResponse('User updated successfully', $user);
+            return $this->successResponse('User updated successfully', $user->load('roles'));
         } catch (\Illuminate\Validation\ValidationException $e) {
-            return $this->errorResponse($e->getMessage(), 422);
+            return response()->json([
+                'message' => $e->getMessage(),
+                'errors' => $e->errors(),
+            ], 422);
         } catch (Exception $e) {
             Log::error('Update User Error: ' . $e->getMessage());
             return $this->errorResponse('Failed to update user', 500);
@@ -161,6 +195,71 @@ class UserController extends Controller
         } catch (Exception $e) {
             Log::error('Fetch Inactive Users Error: ' . $e->getMessage());
             return $this->errorResponse('Failed to retrieve inactive users', 500);
+        }
+    }
+
+    /**
+     * Explicitly assign roles to a user.
+     */
+    public function assignRoles(Request $request, int $id): JsonResponse
+    {
+        try {
+            $user = User::find($id);
+
+            if (!$user) {
+                return $this->errorResponse('User not found', 404);
+            }
+
+            $data = $request->validate([
+                'roles' => ['required', 'array'],
+            ]);
+
+            $this->syncRoles($user, $data['roles']);
+
+            return $this->successResponse('Roles assigned successfully', $user->load('roles'));
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            return response()->json([
+                'message' => $e->getMessage(),
+                'errors' => $e->errors(),
+            ], 422);
+        } catch (Exception $e) {
+            Log::error('Assign Roles Error: ' . $e->getMessage());
+            return $this->errorResponse('Failed to assign roles', 500);
+        }
+    }
+
+    /**
+     * Sync user roles by name or ID.
+     */
+    protected function syncRoles(User $user, $rolesInput): void
+    {
+        if (is_null($rolesInput)) {
+            return;
+        }
+
+        $roles = is_array($rolesInput) ? $rolesInput : [$rolesInput];
+        $roleIds = [];
+
+        foreach ($roles as $item) {
+            if (is_numeric($item)) {
+                $roleIds[] = (int)$item;
+            } elseif (is_string($item)) {
+                $role = Role::where('name', strtolower($item))->first();
+                if ($role) {
+                    $roleIds[] = $role->id;
+                }
+            }
+        }
+
+        $user->roles()->sync($roleIds);
+        
+        // Also update the role column in users table with the first role's name for compatibility
+        if (count($roles) > 0) {
+            $firstRole = is_numeric($roles[0]) ? Role::find($roles[0])?->name : $roles[0];
+            if ($firstRole) {
+                $user->role = $firstRole;
+                $user->save();
+            }
         }
     }
 }

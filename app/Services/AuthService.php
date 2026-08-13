@@ -43,9 +43,16 @@ class AuthService
         // Generate Sanctum token
         $token = $user->createToken('auth_token')->plainTextToken;
 
+        // Ensure roles are loaded and return role info in response
+        $user->load('roles');
+        $roles = $user->roles->pluck('name')->toArray();
+        $primaryRole = $roles[0] ?? null;
+
         return [
             'token' => $token,
             'user' => $user,
+            'roles' => $roles,
+            'role' => $primaryRole,
         ];
     }
 

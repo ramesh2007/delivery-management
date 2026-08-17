@@ -18,16 +18,22 @@ class Order extends Model
         'delivery_address',
         'total_amount',
         'status',
+        'bag_count',
         'assigned_to',
         'assigned_user_name',
         'assigned_at',
+        'packed_by',
+        'packed_user_name',
+        'packed_at',
         'delivered_by',
         'delivered_user_name',
         'delivered_at',
     ];
 
     protected $casts = [
+        'bag_count' => 'integer',
         'assigned_at' => 'datetime',
+        'packed_at' => 'datetime',
         'delivered_at' => 'datetime',
     ];
 
@@ -48,11 +54,27 @@ class Order extends Model
     }
 
     /**
+     * Get packer verifications for this order.
+     */
+    public function packerVerifications(): HasMany
+    {
+        return $this->hasMany(PackerVerification::class, 'order_id')->orderBy('created_at', 'desc');
+    }
+
+    /**
      * Get the user/picker assigned to this order.
      */
     public function assignedUser(): BelongsTo
     {
         return $this->belongsTo(User::class, 'assigned_to');
+    }
+
+    /**
+     * Get the user who packed this order.
+     */
+    public function packedUser(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'packed_by');
     }
 
     /**

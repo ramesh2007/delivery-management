@@ -11,12 +11,27 @@ use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
 
-#[Fillable(['name', 'email', 'phone', 'password', 'role', 'status'])]
+#[Fillable(['name', 'email', 'username', 'phone', 'password', 'role', 'status', 'erpnext_user_id', 'erpnext_api_key', 'erpnext_api_secret', 'erpnext_token', 'erpnext_synced_at'])]
 #[Hidden(['password', 'remember_token'])]
 class User extends Authenticatable
 {
     /** @use HasFactory<UserFactory> */
     use HasApiTokens, HasFactory, Notifiable;
+
+    protected $fillable = [
+        'name',
+        'email',
+        'username',
+        'phone',
+        'password',
+        'role',
+        'status',
+        'erpnext_user_id',
+        'erpnext_api_key',
+        'erpnext_api_secret',
+        'erpnext_token',
+        'erpnext_synced_at',
+    ];
 
     /**
      * Get the attributes that should be cast.
@@ -27,6 +42,7 @@ class User extends Authenticatable
     {
         return [
             'email_verified_at' => 'datetime',
+            'erpnext_synced_at' => 'datetime',
             'password' => 'hashed',
         ];
     }

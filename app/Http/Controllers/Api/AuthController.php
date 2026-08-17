@@ -37,17 +37,13 @@ class AuthController extends Controller
     public function login(LoginRequest $request): JsonResponse
     {
         try {
-            $data = $this->authService->login($request->validated());
+            $data = $this->authService->login($request->all());
 
             return $this->successResponse('Login successful', $data);
         } catch (Exception $e) {
             Log::error('Login Error: ' . $e->getMessage());
 
-            if ($e->getMessage() === 'Invalid credentials' || $e->getMessage() === 'Your account is inactive.') {
-                return $this->errorResponse($e->getMessage(), 401);
-            }
-
-            return $this->errorResponse('An error occurred during login', 500);
+            return $this->errorResponse($e->getMessage() ?: 'Invalid ERPNext credentials', 401);
         }
     }
 

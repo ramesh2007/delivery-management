@@ -44,4 +44,9 @@ return [
         'redirect_uri' => env('SHOPIFY_REDIRECT_URI', 'https://delivery-management.hmws.qatar123.com/public/shopify/callback'),
     ],
 
+    'erpnext' => [
+        'base_url' => env('ERPNEXT_BASE_URL', 'https://halamama.rakonex.cc'),
+        'login_endpoint' => env('ERPNEXT_LOGIN_ENDPOINT', '/api/method/warehouse_management.api.login.mobile_login'),
+    ],
+
 ];

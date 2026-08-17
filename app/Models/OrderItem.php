@@ -21,6 +21,10 @@ class OrderItem extends Model
         'quantity',
         'unit_price',
         'status',
+        'is_packer_verified',
+        'packer_verified_by',
+        'packer_verified_user_name',
+        'packer_verified_at',
         'assigned_to',
         'assigned_user_name',
         'assigned_at',
@@ -36,6 +40,8 @@ class OrderItem extends Model
     ];
 
     protected $casts = [
+        'is_packer_verified' => 'boolean',
+        'packer_verified_at' => 'datetime',
         'assigned_at' => 'datetime',
         'picked_at' => 'datetime',
         'packed_at' => 'datetime',
@@ -88,5 +94,13 @@ class OrderItem extends Model
     public function deliveredUser(): BelongsTo
     {
         return $this->belongsTo(User::class, 'delivered_by');
+    }
+
+    /**
+     * Get the packer who verified this item.
+     */
+    public function packerVerifiedUser(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'packer_verified_by');
     }
 }

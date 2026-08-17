@@ -26,8 +26,16 @@ Route::get('/demo/order-management/orders/{order}', [\App\Http\Controllers\Api\R
 Route::get('/orders', [OrderManagementController::class, 'index']);
 Route::get('/orders/{id}', [OrderManagementController::class, 'show']);
 Route::post('/orders/assign-me', [OrderManagementController::class, 'assignOrder']);
+Route::post('/orders/unassign', [OrderManagementController::class, 'unassignOrder']);
+Route::post('/orders/unassign-me', [OrderManagementController::class, 'unassignOrder']);
 Route::post('/orders/items/assign-me', [OrderManagementController::class, 'assignItems']);
+Route::post('/orders/items/unassign', [OrderManagementController::class, 'unassignItems']);
+Route::post('/orders/items/unassign-me', [OrderManagementController::class, 'unassignItems']);
 Route::post('/orders/items/update-status', [OrderManagementController::class, 'updateItemStatus']);
+
+// Packer Workflow API Endpoints (Barcode Scan Verification & Packing Bag Count)
+Route::post('/orders/packer/verify-item', [OrderManagementController::class, 'verifyItemBarcode']);
+Route::post('/orders/packer/complete-packing', [OrderManagementController::class, 'completePacking']);
 
 Route::post('/orders/{id}/status', [OrderManagementController::class, 'updateOrderStatus']);
 Route::get('/orders/{id}/logs', [OrderManagementController::class, 'getLogs']);

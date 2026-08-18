@@ -62,13 +62,23 @@ class Order extends Model
     }
 
     /**
+     * Get discrepancies reported for items in this order.
+     */
+    public function discrepancies(): HasMany
+    {
+        return $this->hasMany(OrderItemDiscrepancy::class, 'order_id')->orderBy('created_at', 'desc');
+    }
+
+    /**
      * Get the user/picker assigned to this order.
      */
     public function assignedUser(): BelongsTo
     {
         return $this->belongsTo(User::class, 'assigned_to');
     }
-
+    public function pickedUser(){
+        return $this->belongsTo(User::Class,'picked_by');
+    }
     /**
      * Get the user who packed this order.
      */

@@ -19,12 +19,14 @@ Route::post('/shopify/sync-orders', [OrderManagementController::class, 'syncShop
 Route::get('/shopify/status', [ShopifyController::class, 'apiStatus']);
 Route::get('/shopify/products', [ShopifyController::class, 'apiProducts']);
 Route::get('/shopify/orders', [ShopifyController::class, 'apiOrders']);
+
 Route::get('/demo/order-management/orders/{order}', [\App\Http\Controllers\Api\ResourceController::class, 'salesOrderDetail'])
     ->where('order', '.*');
 
 // Flutter App Order Management API Endpoints (Sync, Item Status update, Picker Assignment, User Logs)
 Route::get('/orders', [OrderManagementController::class, 'index']);
-Route::get('/orders/{id}', [OrderManagementController::class, 'show']);
+Route::get('/orders/{id}', [OrderManagementController::class, 'apiOrdersById']);
+Route::get('/orders-complete/{id}', [OrderManagementController::class, 'apiOrdersComplete']);
 Route::post('/orders/assign-me', [OrderManagementController::class, 'assignOrder']);
 Route::post('/orders/unassign', [OrderManagementController::class, 'unassignOrder']);
 Route::post('/orders/unassign-me', [OrderManagementController::class, 'unassignOrder']);
@@ -36,6 +38,11 @@ Route::post('/orders/items/update-status', [OrderManagementController::class, 'u
 // Packer Workflow API Endpoints (Barcode Scan Verification & Packing Bag Count)
 Route::post('/orders/packer/verify-item', [OrderManagementController::class, 'verifyItemBarcode']);
 Route::post('/orders/packer/complete-packing', [OrderManagementController::class, 'completePacking']);
+
+// Order Item Discrepancy & Flagging Endpoints
+Route::post('/orders/items/flag-discrepancy', [OrderManagementController::class, 'flagItemDiscrepancy']);
+Route::get('/orders/items/discrepancies', [OrderManagementController::class, 'getDiscrepancies']);
+Route::post('/orders/items/resolve-discrepancy', [OrderManagementController::class, 'resolveDiscrepancy']);
 
 Route::post('/orders/{id}/status', [OrderManagementController::class, 'updateOrderStatus']);
 Route::get('/orders/{id}/logs', [OrderManagementController::class, 'getLogs']);

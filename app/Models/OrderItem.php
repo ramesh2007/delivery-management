@@ -21,6 +21,8 @@ class OrderItem extends Model
         'quantity',
         'unit_price',
         'status',
+        'is_flagged',
+        'flag_reason',
         'is_packer_verified',
         'packer_verified_by',
         'packer_verified_user_name',
@@ -40,6 +42,7 @@ class OrderItem extends Model
     ];
 
     protected $casts = [
+        'is_flagged' => 'boolean',
         'is_packer_verified' => 'boolean',
         'packer_verified_at' => 'datetime',
         'assigned_at' => 'datetime',
@@ -47,6 +50,14 @@ class OrderItem extends Model
         'packed_at' => 'datetime',
         'delivered_at' => 'datetime',
     ];
+
+    /**
+     * Get discrepancies reported for this item.
+     */
+    public function discrepancies(): HasMany
+    {
+        return $this->hasMany(OrderItemDiscrepancy::class, 'order_item_id');
+    }
 
     /**
      * Get the order that owns this item.

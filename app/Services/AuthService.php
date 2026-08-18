@@ -118,14 +118,8 @@ class AuthService
 
             return [
                 'token' => $token,
-                // 'api_key' => $user->erpnext_api_key,
-                // 'api_secret' => $user->erpnext_api_secret,
-                // 'user_creds' => [
-                //     'api_key' => $user->erpnext_api_key,
-                //     'api_secret' => $user->erpnext_api_secret,
-                // ],
-                // 'erpnext_api_key' => $user->erpnext_api_key,
-                // 'erpnext_api_secret' => $user->erpnext_api_secret,
+                'erpnext_api_key' => $user->erpnext_api_key,
+                'erpnext_api_secret' => $user->erpnext_api_secret,
                 'erpnext_token' => $user->erpnext_token,
                 'user' => $user,
                 'roles' => $assignedRoles,

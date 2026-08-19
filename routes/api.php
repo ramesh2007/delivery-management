@@ -35,9 +35,21 @@ Route::post('/orders/items/unassign', [OrderManagementController::class, 'unassi
 Route::post('/orders/items/unassign-me', [OrderManagementController::class, 'unassignItems']);
 Route::post('/orders/items/update-status', [OrderManagementController::class, 'updateItemStatus']);
 
-// Packer Workflow API Endpoints (Barcode Scan Verification & Packing Bag Count)
+// Packer Workflow API Endpoints (Assignment, Picked Orders List, Barcode Verification, Bag Count & Packed Orders List)
+Route::get('/orders/packer/picked/{user_id?}', [OrderManagementController::class, 'getPickedOrdersForPacker']);
+Route::get('/orders/packer/ready-to-pack', [OrderManagementController::class, 'getPickedOrdersForPacker']);
+Route::get('/orders-picked/{id?}', [OrderManagementController::class, 'getPickedOrdersForPacker']);
+Route::post('/orders/packer/assign-me', [OrderManagementController::class, 'assignPacker']);
+Route::post('/orders/packer/assign', [OrderManagementController::class, 'assignPacker']);
+Route::post('/orders/packer/unassign-me', [OrderManagementController::class, 'unassignPacker']);
+Route::post('/orders/packer/unassign', [OrderManagementController::class, 'unassignPacker']);
+
 Route::post('/orders/packer/verify-item', [OrderManagementController::class, 'verifyItemBarcode']);
 Route::post('/orders/packer/complete-packing', [OrderManagementController::class, 'completePacking']);
+
+
+Route::get('/orders/packer/packed/{user_id?}', [OrderManagementController::class, 'getPackedOrders']);
+Route::get('/orders-packed/{id?}', [OrderManagementController::class, 'getPackedOrders']);
 
 // Order Item Discrepancy & Flagging Endpoints
 Route::post('/orders/items/flag-discrepancy', [OrderManagementController::class, 'flagItemDiscrepancy']);

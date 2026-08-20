@@ -46,6 +46,7 @@ class OrderStatusApiController extends Controller
             'packedUser',
             'deliveredUser',
             'packerAssignment',
+            'driverAssignment',
             'logs.user',
         ]);
 
@@ -214,7 +215,7 @@ class OrderStatusApiController extends Controller
 
     /**
      * 7. GET /api/orders/in-delivery or /api/orders/status/in-delivery
-     * Retrieve orders currently out for delivery (status = 'out_for_delivery' or 'in_delivery').
+     * Retrieve orders currently out for delivery (status = 'assigned_to_driver', 'out_for_delivery', or 'in_delivery').
      */
     public function inDelivery(Request $request)
     {
@@ -222,7 +223,7 @@ class OrderStatusApiController extends Controller
         $perPage = min((int) $request->query('per_page', 15), 100);
 
         $paginator = $this->getBaseOrderQuery($request)
-            ->whereIn('status', ['out_for_delivery', 'in_delivery'])
+            ->whereIn('status', ['assigned_to_driver', 'out_for_delivery', 'in_delivery'])
             ->orderBy('updated_at', 'desc')
             ->paginate($perPage);
 
@@ -291,11 +292,26 @@ class OrderStatusApiController extends Controller
                 'name' => $order->assignedUser ? $order->assignedUser->name : ($order->assigned_user_name ?? 'Picker User'),
                 'assigned_at' => $order->assigned_at ? $order->assigned_at->toIso8601String() : null,
             ] : null,
-            'driver_user' => ($order->delivered_by || $order->delivered_user_name) ? [
+            'driver_assignment' => $order->driverAssignment ? [
+                'id' => $order->driverAssignment->id,
+                'assigned_driver_user_id' => (int) $order->driverAssignment->assigned_driver_user_id,
+                'driver_name' => $order->driverAssignment->driver_name,
+                'zone' => $order->driverAssignment->zone,
+                'driver_status' => $order->driverAssignment->driver_status,
+                'assigned_at' => $order->driverAssignment->assigned_at ? $order->driverAssignment->assigned_at->toIso8601String() : null,
+                'accepted_at' => $order->driverAssignment->accepted_at ? $order->driverAssignment->accepted_at->toIso8601String() : null,
+                'started_at' => $order->driverAssignment->started_at ? $order->driverAssignment->started_at->toIso8601String() : null,
+                'delivered_at' => $order->driverAssignment->delivered_at ? $order->driverAssignment->delivered_at->toIso8601String() : null,
+            ] : null,
+            'driver_user' => $order->driverAssignment ? [
+                'id' => (int) $order->driverAssignment->assigned_driver_user_id,
+                'name' => $order->driverAssignment->driver_name,
+                'assigned_at' => $order->driverAssignment->assigned_at ? $order->driverAssignment->assigned_at->toIso8601String() : null,
+            ] : (($order->delivered_by || $order->delivered_user_name) ? [
                 'id' => $order->delivered_by ? (int) $order->delivered_by : null,
                 'name' => $order->deliveredUser ? $order->deliveredUser->name : ($order->delivered_user_name ?? 'Driver User'),
                 'delivered_at' => $order->delivered_at ? $order->delivered_at->toIso8601String() : null,
-            ] : null,
+            ] : null),
             'pickers' => $pickers,
             'packers' => $packers,
             'customer' => [

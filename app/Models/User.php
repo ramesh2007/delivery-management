@@ -90,4 +90,13 @@ class User extends Authenticatable
             $query->whereIn('name', $permissions);
         })->exists();
     }
+
+    /**
+     * Get the driver assignments for this user.
+     */
+    public function driverAssignments()
+    {
+        return $this->hasMany(OrderDriverAssigned::class, 'assigned_driver_user_id');
+    }
 }
+

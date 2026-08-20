@@ -37,10 +37,16 @@ class PickerManagementController extends Controller
             }
         }
 
+        $assignedToFilter = $request->query('assigned_to');
+
         $query = Order::with([
-            'items' => function ($q) {
-                $q->where('status', 'pending')
-                  ->whereNull('assigned_to');
+            'items' => function ($q) use ($assignedToFilter) {
+                $q->where('status', 'pending');
+                if (!empty($assignedToFilter)) {
+                    $q->where('assigned_to', $assignedToFilter);
+                } else {
+                    $q->whereNull('assigned_to');
+                }
             },
 
             'items.assignedUser',
@@ -60,18 +66,16 @@ class PickerManagementController extends Controller
             $query->where('status', $request->query('status'));
         }
 
-        if ($request->has('assigned_to') && !empty($request->query('assigned_to'))) {
+        if (!empty($assignedToFilter)) {
 
-            $assignedTo = $request->query('assigned_to');
-
-            $query->whereHas('items', function ($q) use ($assignedTo) {
-                $q->where('assigned_to', $assignedTo)
+            $query->whereHas('items', function ($q) use ($assignedToFilter) {
+                $q->where('assigned_to', $assignedToFilter)
                   ->where('status', 'pending');
             });
 
             $query->with([
-                'items' => function ($q) use ($assignedTo) {
-                    $q->where('assigned_to', $assignedTo)
+                'items' => function ($q) use ($assignedToFilter) {
+                    $q->where('assigned_to', $assignedToFilter)
                       ->where('status', 'pending');
                 },
                 'items.assignedUser',
@@ -117,21 +121,23 @@ class PickerManagementController extends Controller
 
         // Format response
         $formattedOrders = $orders
-            ->map(function ($order) {
+            ->map(function ($order) use ($assignedToFilter) {
 
                 $order->setRelation(
                     'items',
                     $order->items
-                        ->filter(function ($item) {
-
+                        ->filter(function ($item) use ($assignedToFilter) {
+                            if (!empty($assignedToFilter)) {
+                                return $item->status === 'pending'
+                                    && (string)$item->assigned_to === (string)$assignedToFilter;
+                            }
                             return $item->status === 'pending'
                                 && is_null($item->assigned_to);
-
                         })
                         ->values()
                 );
 
-                // If no matching items, don't return the order
+                // If no matching items left, don't return the order
                 if ($order->items->isEmpty()) {
                     return null;
                 }

@@ -10,6 +10,7 @@ use App\Http\Controllers\Api\OrderManagementController;
 use App\Http\Controllers\Api\PackerManagementController;
 use App\Http\Controllers\Api\PickerManagementController;
 use App\Http\Controllers\Api\OrderStatusApiController;
+use App\Http\Controllers\Api\DriverManagementController;
 
 use App\Http\Controllers\ShopifyController;
 
@@ -41,6 +42,23 @@ Route::get('/orders/in-delivery', [OrderStatusApiController::class, 'inDelivery'
 
 Route::get('/orders/status/delivered', [OrderStatusApiController::class, 'delivered']);
 Route::get('/orders/delivered', [OrderStatusApiController::class, 'delivered']);
+
+// Driver Management & Order Assignment Endpoints (React.js Frontend & Flutter App)
+Route::get('/get-drivers-list', [DriverManagementController::class, 'index']);
+Route::get('/drivers', [DriverManagementController::class, 'index']);
+
+// React.js API to assign driver to an order
+Route::post('/driver/assign', [DriverManagementController::class, 'assignDriver']);
+Route::post('/orders/assign-driver', [DriverManagementController::class, 'assignDriver']);
+
+// Flutter App API to fetch assigned orders for a driver using driver user id
+Route::get('/driver/assigned-orders/{driver_user_id}', [DriverManagementController::class, 'getAssignedOrders']);
+Route::get('/driver-orders/{driver_user_id}', [DriverManagementController::class, 'getAssignedOrders']);
+
+// Flutter App API to update driver status (assigned, accepted, started, delivered, cancelled, refund, exchange)
+Route::post('/driver/update-status', [DriverManagementController::class, 'updateDriverStatus']);
+Route::post('/driver-orders/update-status', [DriverManagementController::class, 'updateDriverStatus']);
+
 
 
 // Shopify Sync & Order Management endpoints

@@ -103,4 +103,13 @@ class Order extends Model
     {
         return $this->hasOne(OrderPackerAssigned::class, 'order_id');
     }
+
+    /**
+     * Get the current driver assignment for this order.
+     */
+    public function driverAssignment(): HasOne
+    {
+        return $this->hasOne(OrderDriverAssigned::class, 'order_id');
+    }
 }
+

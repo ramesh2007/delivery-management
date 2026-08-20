@@ -7,12 +7,41 @@ use App\Http\Controllers\Api\UserController;
 use App\Http\Controllers\Api\RoleController;
 use App\Http\Controllers\Api\PermissionController;
 use App\Http\Controllers\Api\OrderManagementController;
+use App\Http\Controllers\Api\PackerManagementController;
+use App\Http\Controllers\Api\PickerManagementController;
+use App\Http\Controllers\Api\OrderStatusApiController;
 
 use App\Http\Controllers\ShopifyController;
 
 Route::post('/login', [AuthController::class, 'login']);
 Route::post('/users', [UserController::class, 'store']); // Public registration
 Route::get('/ping', [\App\Http\Controllers\Api\ResourceController::class, 'ping']);
+
+// Dedicated Order Status List Endpoints (Paginated for Large Datasets)
+Route::get('/orders/status/all', [OrderStatusApiController::class, 'all']);
+Route::get('/orders/all', [OrderStatusApiController::class, 'all']);
+
+Route::get('/orders/status/new', [OrderStatusApiController::class, 'newOrders']);
+Route::get('/orders/new', [OrderStatusApiController::class, 'newOrders']);
+
+Route::get('/orders/status/ready-to-assign', [OrderStatusApiController::class, 'readyToAssign']);
+Route::get('/orders/ready-to-assign', [OrderStatusApiController::class, 'readyToAssign']);
+
+Route::get('/orders/status/picking', [OrderStatusApiController::class, 'picking']);
+Route::get('/orders/picking', [OrderStatusApiController::class, 'picking']);
+
+Route::get('/orders/status/picked', [OrderStatusApiController::class, 'picked']);
+Route::get('/orders/picked', [OrderStatusApiController::class, 'picked']);
+
+Route::get('/orders/status/packing', [OrderStatusApiController::class, 'packing']);
+Route::get('/orders/packing', [OrderStatusApiController::class, 'packing']);
+
+Route::get('/orders/status/in-delivery', [OrderStatusApiController::class, 'inDelivery']);
+Route::get('/orders/in-delivery', [OrderStatusApiController::class, 'inDelivery']);
+
+Route::get('/orders/status/delivered', [OrderStatusApiController::class, 'delivered']);
+Route::get('/orders/delivered', [OrderStatusApiController::class, 'delivered']);
+
 
 // Shopify Sync & Order Management endpoints
 Route::post('/shopify/sync-orders', [OrderManagementController::class, 'syncShopify']);
@@ -24,32 +53,36 @@ Route::get('/demo/order-management/orders/{order}', [\App\Http\Controllers\Api\R
     ->where('order', '.*');
 
 // Flutter App Order Management API Endpoints (Sync, Item Status update, Picker Assignment, User Logs)
-Route::get('/orders', [OrderManagementController::class, 'index']);
-Route::get('/orders/{id}', [OrderManagementController::class, 'apiOrdersById']);
-Route::get('/orders-complete/{id}', [OrderManagementController::class, 'apiOrdersComplete']);
-Route::post('/orders/assign-me', [OrderManagementController::class, 'assignOrder']);
-Route::post('/orders/unassign', [OrderManagementController::class, 'unassignOrder']);
-Route::post('/orders/unassign-me', [OrderManagementController::class, 'unassignOrder']);
-Route::post('/orders/items/assign-me', [OrderManagementController::class, 'assignItems']);
-Route::post('/orders/items/unassign', [OrderManagementController::class, 'unassignItems']);
-Route::post('/orders/items/unassign-me', [OrderManagementController::class, 'unassignItems']);
-Route::post('/orders/items/update-status', [OrderManagementController::class, 'updateItemStatus']);
+Route::get('/orders', [PickerManagementController::class, 'index']);
+Route::get('/orders/{id}', [PickerManagementController::class, 'apiOrdersById']);
+Route::get('/orders-complete/{id}', [PickerManagementController::class, 'apiOrdersComplete']);
+Route::post('/orders/assign-me', [PickerManagementController::class, 'assignOrder']);
+Route::post('/orders/unassign', [PickerManagementController::class, 'unassignOrder']);
+Route::post('/orders/unassign-me', [PickerManagementController::class, 'unassignOrder']);
+Route::post('/orders/items/assign-me', [PickerManagementController::class, 'assignItems']);
+Route::post('/orders/items/unassign', [PickerManagementController::class, 'unassignItems']);
+Route::post('/orders/items/unassign-me', [PickerManagementController::class, 'unassignItems']);
+Route::post('/orders/items/update-status', [PickerManagementController::class, 'updateItemStatus']);
 
-// Packer Workflow API Endpoints (Assignment, Picked Orders List, Barcode Verification, Bag Count & Packed Orders List)
-Route::get('/orders/packer/picked/{user_id?}', [OrderManagementController::class, 'getPickedOrdersForPacker']);
-Route::get('/orders/packer/ready-to-pack', [OrderManagementController::class, 'getPickedOrdersForPacker']);
-Route::get('/orders-picked/{id?}', [OrderManagementController::class, 'getPickedOrdersForPacker']);
-Route::post('/orders/packer/assign-me', [OrderManagementController::class, 'assignPacker']);
-Route::post('/orders/packer/assign', [OrderManagementController::class, 'assignPacker']);
-Route::post('/orders/packer/unassign-me', [OrderManagementController::class, 'unassignPacker']);
-Route::post('/orders/packer/unassign', [OrderManagementController::class, 'unassignPacker']);
+// Packer Workflow API Endpoints (Assignment, Barcode Verification, Bag Count & Order Lists)
+Route::get('/orders/packer/ready-to-pack', [PackerManagementController::class, 'getPickedOrdersForPacker']);
+Route::get('/orders/packer/picked/{user_id?}', [PackerManagementController::class, 'getPickedOrdersForPacker']);
+Route::get('/orders-picked/{id?}', [PackerManagementController::class, 'getPickedOrdersForPacker']);
 
-Route::post('/orders/packer/verify-item', [OrderManagementController::class, 'verifyItemBarcode']);
-Route::post('/orders/packer/complete-packing', [OrderManagementController::class, 'completePacking']);
+Route::get('/orders/packer/packed/{user_id?}', [PackerManagementController::class, 'getPackedOrders']);
+Route::get('/orders-packed/{id?}', [PackerManagementController::class, 'getPackedOrders']);
+Route::get('/orders/packed-completed/{id?}', [PackerManagementController::class, 'apiPackerOrdersComplete']);
+Route::get('/orders/packer/complete/{id?}', [PackerManagementController::class, 'apiPackerOrdersComplete']);
 
+Route::get('/orders/packer/{id}', [PackerManagementController::class, 'apiPackerOrdersById']);
 
-Route::get('/orders/packer/packed/{user_id?}', [OrderManagementController::class, 'getPackedOrders']);
-Route::get('/orders-packed/{id?}', [OrderManagementController::class, 'getPackedOrders']);
+Route::post('/orders/packer/assign-me', [PackerManagementController::class, 'assignPacker']);
+Route::post('/orders/packer/assign', [PackerManagementController::class, 'assignPacker']);
+Route::post('/orders/packer/unassign-me', [PackerManagementController::class, 'unassignPacker']);
+Route::post('/orders/packer/unassign', [PackerManagementController::class, 'unassignPacker']);
+
+Route::post('/orders/packer/verify-item', [PackerManagementController::class, 'verifyItemBarcode']);
+Route::post('/orders/packer/complete-packing', [PackerManagementController::class, 'completePacking']);
 
 // Order Item Discrepancy & Flagging Endpoints
 Route::post('/orders/items/flag-discrepancy', [OrderManagementController::class, 'flagItemDiscrepancy']);

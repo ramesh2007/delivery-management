@@ -71,7 +71,7 @@ class PackerManagementController extends Controller
             $iq->where('status', 'pending');
         });
 
-        // Optional filter by assigned packer ID if passed
+        // Filter by assigned packer ID if passed; otherwise default to unassigned ready-to-pack orders
         if (!empty($packerId)) {
             $query->where(function ($q) use ($packerId) {
                 $q->where('packed_by', $packerId)
@@ -81,8 +81,8 @@ class PackerManagementController extends Controller
                         ->orWhere('packer_assigned_user_name', $packerId);
                   });
             });
-        } elseif ($request->boolean('unassigned')) {
-            // Unassigned orders to any packer
+        } else {
+            // Default: Exclude any order that is already assigned to a packer in orders table or orders_packer_assigned table
             $query->whereNull('packed_by')
                   ->whereDoesntHave('packerAssignment');
         }
@@ -881,6 +881,10 @@ class PackerManagementController extends Controller
                     'item_id' => $item->id,
                     'line_item_id' => $item->line_item_id,
                     'product_name' => $item->product_name,
+                    'image' => $item->image,
+                    'image_url' => $item->image,
+                    'product_image' => $item->image,
+                    'product_image_url' => $item->image,
                     'barcode' => $item->barcode,
                     'quantity' => (int) $item->quantity,
                     'unit_price' => (float) $item->unit_price,

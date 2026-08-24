@@ -11,18 +11,20 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::create('order_status_logs', function (Blueprint $table) {
-            $table->id();
-            $table->foreignId('order_id')->constrained('orders')->onDelete('cascade');
-            $table->foreignId('order_item_id')->nullable()->constrained('order_items')->onDelete('cascade');
-            $table->foreignId('user_id')->nullable()->constrained('users')->onDelete('set null');
-            $table->string('user_name')->nullable();
-            $table->string('action'); // e.g. item_status_updated, order_status_updated, shopify_synced
-            $table->string('old_status')->nullable();
-            $table->string('new_status');
-            $table->text('notes')->nullable();
-            $table->timestamps();
-        });
+        if (!Schema::hasTable('order_status_logs')) {
+            Schema::create('order_status_logs', function (Blueprint $table) {
+                $table->id();
+                $table->foreignId('order_id')->constrained('orders')->onDelete('cascade');
+                $table->foreignId('order_item_id')->nullable()->constrained('order_items')->onDelete('cascade');
+                $table->foreignId('user_id')->nullable()->constrained('users')->onDelete('set null');
+                $table->string('user_name')->nullable();
+                $table->string('action'); // e.g. item_status_updated, order_status_updated, shopify_synced
+                $table->string('old_status')->nullable();
+                $table->string('new_status');
+                $table->text('notes')->nullable();
+                $table->timestamps();
+            });
+        }
     }
 
     /**

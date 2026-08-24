@@ -12,15 +12,19 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('orders', function (Blueprint $table) {
-            $table->foreignId('assigned_to')->nullable()->after('status')->constrained('users')->nullOnDelete();
-            $table->string('assigned_user_name')->nullable()->after('assigned_to');
-            $table->timestamp('assigned_at')->nullable()->after('assigned_user_name');
+            if (!Schema::hasColumn('orders', 'assigned_to')) {
+                $table->foreignId('assigned_to')->nullable()->after('status')->constrained('users')->nullOnDelete();
+                $table->string('assigned_user_name')->nullable()->after('assigned_to');
+                $table->timestamp('assigned_at')->nullable()->after('assigned_user_name');
+            }
         });
 
         Schema::table('order_items', function (Blueprint $table) {
-            $table->foreignId('assigned_to')->nullable()->after('status')->constrained('users')->nullOnDelete();
-            $table->string('assigned_user_name')->nullable()->after('assigned_to');
-            $table->timestamp('assigned_at')->nullable()->after('assigned_user_name');
+            if (!Schema::hasColumn('order_items', 'assigned_to')) {
+                $table->foreignId('assigned_to')->nullable()->after('status')->constrained('users')->nullOnDelete();
+                $table->string('assigned_user_name')->nullable()->after('assigned_to');
+                $table->timestamp('assigned_at')->nullable()->after('assigned_user_name');
+            }
         });
     }
 

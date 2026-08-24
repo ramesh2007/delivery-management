@@ -12,20 +12,28 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('orders', function (Blueprint $table) {
-            $table->foreignId('delivered_by')->nullable()->constrained('users')->nullOnDelete()->after('assigned_at');
-            $table->string('delivered_user_name')->nullable()->after('delivered_by');
-            $table->timestamp('delivered_at')->nullable()->after('delivered_user_name');
+            if (!Schema::hasColumn('orders', 'delivered_by')) {
+                $table->foreignId('delivered_by')->nullable()->constrained('users')->nullOnDelete()->after('assigned_at');
+                $table->string('delivered_user_name')->nullable()->after('delivered_by');
+                $table->timestamp('delivered_at')->nullable()->after('delivered_user_name');
+            }
         });
 
         Schema::table('order_items', function (Blueprint $table) {
-            $table->foreignId('picked_by')->nullable()->constrained('users')->nullOnDelete()->after('assigned_at');
-            $table->string('picked_user_name')->nullable()->after('picked_by');
+            if (!Schema::hasColumn('order_items', 'picked_by')) {
+                $table->foreignId('picked_by')->nullable()->constrained('users')->nullOnDelete()->after('assigned_at');
+                $table->string('picked_user_name')->nullable()->after('picked_by');
+            }
 
-            $table->foreignId('packed_by')->nullable()->constrained('users')->nullOnDelete()->after('picked_at');
-            $table->string('packed_user_name')->nullable()->after('packed_by');
+            if (!Schema::hasColumn('order_items', 'packed_by')) {
+                $table->foreignId('packed_by')->nullable()->constrained('users')->nullOnDelete()->after('picked_at');
+                $table->string('packed_user_name')->nullable()->after('packed_by');
+            }
 
-            $table->foreignId('delivered_by')->nullable()->constrained('users')->nullOnDelete()->after('packed_at');
-            $table->string('delivered_user_name')->nullable()->after('delivered_by');
+            if (!Schema::hasColumn('order_items', 'delivered_by')) {
+                $table->foreignId('delivered_by')->nullable()->constrained('users')->nullOnDelete()->after('packed_at');
+                $table->string('delivered_user_name')->nullable()->after('delivered_by');
+            }
         });
     }
 

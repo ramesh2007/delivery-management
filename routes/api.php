@@ -11,6 +11,7 @@ use App\Http\Controllers\Api\PackerManagementController;
 use App\Http\Controllers\Api\PickerManagementController;
 use App\Http\Controllers\Api\OrderStatusApiController;
 use App\Http\Controllers\Api\DriverManagementController;
+use App\Http\Controllers\Api\DeliveryManagementController;
 
 use App\Http\Controllers\ShopifyController;
 
@@ -69,6 +70,10 @@ Route::get('/shopify/orders', [ShopifyController::class, 'apiOrders']);
 
 Route::get('/demo/order-management/orders/{order}', [\App\Http\Controllers\Api\ResourceController::class, 'salesOrderDetail'])
     ->where('order', '.*');
+Route::get('/admin/order/{order}', [\App\Http\Controllers\Api\ResourceController::class, 'salesOrderDetail'])
+    ->where('order', '.*');
+Route::get('/order-details/{order}', [\App\Http\Controllers\Api\ResourceController::class, 'salesOrderDetail'])
+    ->where('order', '.*');
 
 // Flutter App Order Management API Endpoints (Sync, Item Status update, Picker Assignment, User Logs)
 Route::get('/orders', [PickerManagementController::class, 'index']);
@@ -101,6 +106,17 @@ Route::post('/orders/packer/unassign', [PackerManagementController::class, 'unas
 
 Route::post('/orders/packer/verify-item', [PackerManagementController::class, 'verifyItemBarcode']);
 Route::post('/orders/packer/complete-packing', [PackerManagementController::class, 'completePacking']);
+
+//Order Item Driver side
+Route::post('/orders/driver/assigned', [DeliveryManagementController::class, 'assignedDriver']);
+Route::post('/orders/driver/assign', [DeliveryManagementController::class, 'assignDriver']);
+Route::post('/orders/driver/accepted', [DeliveryManagementController::class, 'orderAccepted']);
+Route::post('/orders/driver/unaccepted', [DeliveryManagementController::class, 'orderUnaccepted']);
+Route::post('/orders/driver/update-status', [DeliveryManagementController::class, 'updateDriverStatus']);
+Route::post('/orders/driver/delivered', [DeliveryManagementController::class, 'orderDelivered']);
+Route::post('/orders/driver/cancelled', [DeliveryManagementController::class, 'orderCancelled']);
+Route::post('/orders/driver/refund', [DeliveryManagementController::class, 'orderRefund']);
+Route::post('/orders/driver/exchange', [DeliveryManagementController::class, 'orderExchange']);
 
 // Order Item Discrepancy & Flagging Endpoints
 Route::post('/orders/items/flag-discrepancy', [OrderManagementController::class, 'flagItemDiscrepancy']);

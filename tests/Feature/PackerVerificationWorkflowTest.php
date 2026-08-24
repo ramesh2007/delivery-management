@@ -28,6 +28,7 @@ class PackerVerificationWorkflowTest extends TestCase
             'barcode' => '8901234567890',
             'product_name' => 'Verified Product',
             'status' => 'picked',
+            'picked_by' => $packer->id,
         ]);
 
         // Packer scans and verifies barcode
@@ -114,6 +115,8 @@ class PackerVerificationWorkflowTest extends TestCase
             'barcode' => '2222222222222',
             'product_name' => 'Item to pack',
             'status' => 'picked',
+            'picked_by' => $packer->id,
+            'is_packer_verified' => true,
         ]);
 
         // Complete packing with 3 bags
@@ -137,7 +140,7 @@ class PackerVerificationWorkflowTest extends TestCase
             ]);
 
         $order->refresh();
-        $this->assertEquals('packed', $order->status);
+        $this->assertEquals('ready_to_assign', $order->status);
         $this->assertEquals(3, $order->bag_count);
         $this->assertEquals($packer->id, $order->packed_by);
 

@@ -290,6 +290,8 @@ class OrderManagementController extends Controller
                         'product_code' => $item->product_code,
                         'barcode' => $item->barcode,
                         'product_name' => $item->product_name,
+                        'image' => $item->image,
+                        'image_url' => $item->image,
                         'quantity' => $item->quantity,
                         'unit_price' => (float) $item->unit_price,
                         'status' => $item->status,

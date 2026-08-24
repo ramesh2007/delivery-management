@@ -7,6 +7,7 @@ use App\Models\User;
 use App\Repositories\Contracts\UserRepositoryInterface;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Exception;
 
 class AuthService
@@ -67,33 +68,53 @@ class AuthService
                 $user = User::where('username', $identifier)->orWhere('email', $identifier)->first();
             }
 
-            if (!$user) {
-                $user = User::create([
-                    'name' => $userName ?? $identifier,
-                    'email' => $userEmail ?: ($erpnextUsername ? $erpnextUsername . '@erpnext.local' : $identifier . '@erpnext.local'),
-                    'username' => $erpnextUsername ?: $identifier,
-                    'password' => Hash::make($password),
-                    'status' => 'active',
-                    'role' => $erpnextRoles[0] ?? 'User',
-                    'erpnext_user_id' => $erpnextUserId,
-                    'erpnext_api_key' => $erpnextApiKey,
-                    'erpnext_api_secret' => $erpnextApiSecret,
-                    'erpnext_token' => $erpnextToken,
-                    'erpnext_synced_at' => now(),
-                ]);
+            // If user's local record has an erpnext_token formatted as 'token KEY:SECRET' but missing api_key/api_secret:
+            $dbApiKey = $user ? $user->erpnext_api_key : null;
+            $dbApiSecret = $user ? $user->erpnext_api_secret : null;
+
+            if (($user && (!$dbApiKey || !$dbApiSecret)) && !empty($user->erpnext_token) && str_starts_with($user->erpnext_token, 'token ')) {
+                $parts = explode(':', str_replace('token ', '', $user->erpnext_token));
+                if (count($parts) === 2) {
+                    $dbApiKey = $dbApiKey ?: $parts[0];
+                    $dbApiSecret = $dbApiSecret ?: $parts[1];
+                }
+            }
+
+            // Determine effective ERPNext credentials & token
+            $finalApiKey = !empty($erpnextApiKey) ? $erpnextApiKey : $dbApiKey;
+            $finalApiSecret = !empty($erpnextApiSecret) ? $erpnextApiSecret : $dbApiSecret;
+
+            // If new API key and secret exist, compute the updated token string directly
+            if (!empty($finalApiKey) && !empty($finalApiSecret)) {
+                $finalToken = "token {$finalApiKey}:{$finalApiSecret}";
+            } elseif (!empty($erpnextToken)) {
+                $finalToken = $erpnextToken;
             } else {
-                $user->update([
-                    'name' => $userName ?: $user->name,
-                    'username' => $erpnextUsername ?: ($user->username ?: $identifier),
-                    'password' => Hash::make($password), // Keep local password hash updated for offline fallback
-                    'status' => 'active',
-                    'role' => $erpnextRoles[0] ?? ($user->role ?? 'User'),
-                    'erpnext_user_id' => $erpnextUserId ?: $user->erpnext_user_id,
-                    'erpnext_api_key' => $erpnextApiKey ?: $user->erpnext_api_key,
-                    'erpnext_api_secret' => $erpnextApiSecret ?: $user->erpnext_api_secret,
-                    'erpnext_token' => $erpnextToken ?: $user->erpnext_token,
-                    'erpnext_synced_at' => now(),
-                ]);
+                $finalToken = $user ? $user->erpnext_token : null;
+            }
+
+            $userPayload = [
+                'name' => $userName ?: ($user ? $user->name : $identifier),
+                'email' => $userEmail ?: ($user ? $user->email : ($erpnextUsername ? $erpnextUsername . '@erpnext.local' : $identifier . '@erpnext.local')),
+                'username' => $erpnextUsername ?: ($user ? $user->username : $identifier),
+                'password' => Hash::make($password),
+                'status' => 'active',
+                'role' => $erpnextRoles[0] ?? ($user ? $user->role : 'User'),
+                'erpnext_user_id' => $erpnextUserId ?: ($user ? $user->erpnext_user_id : null),
+                'erpnext_api_key' => $finalApiKey,
+                'erpnext_api_secret' => $finalApiSecret,
+                'erpnext_token' => $finalToken,
+                'erpnext_synced_at' => now(),
+            ];
+
+            // Safely filter attributes based on columns existing in the users table
+            $validColumns = array_filter(array_keys($userPayload), fn($col) => Schema::hasColumn('users', $col));
+            $userPayload = array_intersect_key($userPayload, array_flip($validColumns));
+
+            if (!$user) {
+                $user = User::create($userPayload);
+            } else {
+                $user->update($userPayload);
             }
 
             // 3. Sync Roles
@@ -106,7 +127,8 @@ class AuthService
                 $user->roles()->sync($roleIds);
             }
 
-            // Generate Sanctum token for OMS session
+            // Revoke old Sanctum tokens so user gets a fresh token each login
+            $user->tokens()->delete();
             $token = $user->createToken('auth_token')->plainTextToken;
 
             $user->load('roles');
@@ -116,11 +138,22 @@ class AuthService
             }
             $primaryRole = $assignedRoles[0] ?? null;
 
+            $resApiKey = Schema::hasColumn('users', 'erpnext_api_key') ? $user->erpnext_api_key : $finalApiKey;
+            $resApiSecret = Schema::hasColumn('users', 'erpnext_api_secret') ? $user->erpnext_api_secret : $finalApiSecret;
+            $resToken = Schema::hasColumn('users', 'erpnext_token') ? $user->erpnext_token : $finalToken;
+
             return [
                 'token' => $token,
-                'erpnext_api_key' => $user->erpnext_api_key,
-                'erpnext_api_secret' => $user->erpnext_api_secret,
-                'erpnext_token' => $user->erpnext_token,
+                'api_key' => $resApiKey,
+                'api_secret' => $resApiSecret,
+                'erpnext_api_key' => $resApiKey,
+                'erpnext_api_secret' => $resApiSecret,
+                'erpnext_token' => $resToken,
+                'user_creds' => [
+                    'api_key' => $resApiKey,
+                    'api_secret' => $resApiSecret,
+                    'token' => $resToken,
+                ],
                 'user' => $user,
                 'roles' => $assignedRoles,
                 'role' => $primaryRole,
@@ -138,22 +171,50 @@ class AuthService
                     throw new Exception('Your account is inactive.');
                 }
 
+                $userApiKey = Schema::hasColumn('users', 'erpnext_api_key') ? $user->erpnext_api_key : null;
+                $userApiSecret = Schema::hasColumn('users', 'erpnext_api_secret') ? $user->erpnext_api_secret : null;
+                $userToken = Schema::hasColumn('users', 'erpnext_token') ? $user->erpnext_token : null;
+
+                if ((!$userApiKey || !$userApiSecret) && !empty($userToken) && str_starts_with($userToken, 'token ')) {
+                    $parts = explode(':', str_replace('token ', '', $userToken));
+                    if (count($parts) === 2) {
+                        $userApiKey = $userApiKey ?: $parts[0];
+                        $userApiSecret = $userApiSecret ?: $parts[1];
+
+                        $fallbackUpdate = [];
+                        if (Schema::hasColumn('users', 'erpnext_api_key')) {
+                            $fallbackUpdate['erpnext_api_key'] = $userApiKey;
+                        }
+                        if (Schema::hasColumn('users', 'erpnext_api_secret')) {
+                            $fallbackUpdate['erpnext_api_secret'] = $userApiSecret;
+                        }
+                        if (!empty($fallbackUpdate)) {
+                            $user->update($fallbackUpdate);
+                        }
+                    }
+                }
+
+                $user->tokens()->delete();
                 $token = $user->createToken('auth_token')->plainTextToken;
                 $user->load('roles');
                 $roles = $user->roles->pluck('name')->toArray();
+                if (empty($roles) && !empty($user->role)) {
+                    $roles = [$user->role];
+                }
                 $primaryRole = $roles[0] ?? $user->role ?? null;
 
                 return [
                     'token' => $token,
-                    'api_key' => $user->erpnext_api_key,
-                    'api_secret' => $user->erpnext_api_secret,
-                    'user_creds' => [
-                        'api_key' => $user->erpnext_api_key,
-                        'api_secret' => $user->erpnext_api_secret,
-                    ],
-                    'erpnext_api_key' => $user->erpnext_api_key,
-                    'erpnext_api_secret' => $user->erpnext_api_secret,
+                    'api_key' => $userApiKey,
+                    'api_secret' => $userApiSecret,
+                    'erpnext_api_key' => $userApiKey,
+                    'erpnext_api_secret' => $userApiSecret,
                     'erpnext_token' => $user->erpnext_token,
+                    'user_creds' => [
+                        'api_key' => $userApiKey,
+                        'api_secret' => $userApiSecret,
+                        'token' => $user->erpnext_token,
+                    ],
                     'user' => $user,
                     'roles' => $roles,
                     'role' => $primaryRole,

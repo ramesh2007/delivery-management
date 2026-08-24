@@ -12,8 +12,8 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('order_items', function (Blueprint $table) {
-            if (!Schema::hasColumn('order_items', 'line_item_id')) {
-                $table->string('line_item_id')->nullable()->after('order_id')->index();
+            if (!Schema::hasColumn('order_items', 'image')) {
+                $table->text('image')->nullable()->after('product_name');
             }
         });
     }
@@ -24,7 +24,9 @@ return new class extends Migration
     public function down(): void
     {
         Schema::table('order_items', function (Blueprint $table) {
-            $table->dropColumn('line_item_id');
+            if (Schema::hasColumn('order_items', 'image')) {
+                $table->dropColumn('image');
+            }
         });
     }
 };

@@ -24,7 +24,7 @@ class OrderStatusApiController extends Controller
         if ($request->boolean('auto_sync', false)) {
             try {
                 $this->shopifyService->syncOrdersToDatabase();
-            } catch (\Exception $e) {
+            } catch (\Throwable $e) {
                 // Ignore sync errors to serve cached local database orders
             }
         }
@@ -101,7 +101,7 @@ class OrderStatusApiController extends Controller
     public function all(Request $request)
     {
         $this->handleSilentSync($request);
-        $perPage = min((int) $request->query('per_page', 15), 100);
+        $perPage = max(1, min((int) $request->query('per_page', 15), 100));
 
         $paginator = $this->getBaseOrderQuery($request)
             ->orderBy('created_at', 'desc')
@@ -117,7 +117,7 @@ class OrderStatusApiController extends Controller
     public function newOrders(Request $request)
     {
         $this->handleSilentSync($request);
-        $perPage = min((int) $request->query('per_page', 15), 100);
+        $perPage = max(1, min((int) $request->query('per_page', 15), 100));
 
         $paginator = $this->getBaseOrderQuery($request)
             ->where('status', 'pending')
@@ -134,14 +134,15 @@ class OrderStatusApiController extends Controller
     public function readyToAssign(Request $request)
     {
         $this->handleSilentSync($request);
-        $perPage = min((int) $request->query('per_page', 15), 100);
+        $perPage = max(1, min((int) $request->query('per_page', 15), 100));
 
         $paginator = $this->getBaseOrderQuery($request)
             ->where(function ($q) {
-                $q->where('status', 'ready_to_assign');
-                //   ->orWhere('status', 'packed');
+                $q->where('status', 'ready_to_assign')
+                  ->orWhere('status', 'packed');
             })
             ->whereNull('delivered_by')
+            ->whereDoesntHave('driverAssignment')
             ->whereDoesntHave('items', function ($iq) {
                 $iq->where('status', '!=', 'packed');
             })
@@ -159,7 +160,7 @@ class OrderStatusApiController extends Controller
     public function picking(Request $request)
     {
         $this->handleSilentSync($request);
-        $perPage = min((int) $request->query('per_page', 15), 100);
+        $perPage = max(1, min((int) $request->query('per_page', 15), 100));
 
         $paginator = $this->getBaseOrderQuery($request)
             ->where(function ($q) {
@@ -182,7 +183,7 @@ class OrderStatusApiController extends Controller
     public function picked(Request $request)
     {
         $this->handleSilentSync($request);
-        $perPage = min((int) $request->query('per_page', 15), 100);
+        $perPage = max(1, min((int) $request->query('per_page', 15), 100));
 
         $paginator = $this->getBaseOrderQuery($request)
             ->where('status', 'picked')
@@ -199,7 +200,7 @@ class OrderStatusApiController extends Controller
     public function packing(Request $request)
     {
         $this->handleSilentSync($request);
-        $perPage = min((int) $request->query('per_page', 15), 100);
+        $perPage = max(1, min((int) $request->query('per_page', 15), 100));
 
         $paginator = $this->getBaseOrderQuery($request)
             ->where(function ($q) {
@@ -220,10 +221,14 @@ class OrderStatusApiController extends Controller
     public function inDelivery(Request $request)
     {
         $this->handleSilentSync($request);
-        $perPage = min((int) $request->query('per_page', 15), 100);
+        $perPage = max(1, min((int) $request->query('per_page', 15), 100));
 
         $paginator = $this->getBaseOrderQuery($request)
-            ->whereIn('status', ['assigned_to_driver', 'out_for_delivery', 'in_delivery'])
+            ->where(function ($q) {
+                $q->whereIn('status', ['assigned_to_driver', 'out_for_delivery', 'in_delivery', 'driver_accepted', 'started'])
+                  ->orWhereHas('driverAssignment');
+            })
+            ->where('status', '!=', 'delivered')
             ->orderBy('updated_at', 'desc')
             ->paginate($perPage);
 
@@ -237,7 +242,7 @@ class OrderStatusApiController extends Controller
     public function delivered(Request $request)
     {
         $this->handleSilentSync($request);
-        $perPage = min((int) $request->query('per_page', 15), 100);
+        $perPage = max(1, min((int) $request->query('per_page', 15), 100));
 
         $paginator = $this->getBaseOrderQuery($request)
             ->where('status', 'delivered')
@@ -334,6 +339,10 @@ class OrderStatusApiController extends Controller
                     'product_code' => $item->product_code,
                     'barcode' => $item->barcode,
                     'product_name' => $item->product_name,
+                    'image' => $item->image,
+                    'image_url' => $item->image,
+                    'product_image' => $item->image,
+                    'product_image_url' => $item->image,
                     'quantity' => $item->quantity,
                     'unit_price' => (float) $item->unit_price,
                     'status' => $item->status,

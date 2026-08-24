@@ -356,6 +356,15 @@ public function exchangeCodeForToken(string $shop, string $code): array
                         })
                         ->first();
 
+                    $itemImage = null;
+                    if (!empty($item['image'])) {
+                        $itemImage = is_array($item['image']) ? ($item['image']['src'] ?? null) : $item['image'];
+                    } elseif (!empty($item['image_url'])) {
+                        $itemImage = $item['image_url'];
+                    } elseif (!empty($item['featured_image']) && is_array($item['featured_image'])) {
+                        $itemImage = $item['featured_image']['src'] ?? null;
+                    }
+
                     if (!$orderItem) {
                         OrderItem::create([
                             'order_id' => $order->id,
@@ -364,6 +373,7 @@ public function exchangeCodeForToken(string $shop, string $code): array
                             'product_code' => $productCode,
                             'barcode' => $barcode,
                             'product_name' => $item['title'] ?? $item['name'] ?? 'Product',
+                            'image' => $itemImage,
                             'quantity' => $item['quantity'] ?? 1,
                             'unit_price' => $item['price'] ?? 0.00,
                             'status' => 'pending', // Default status for new item
@@ -375,6 +385,7 @@ public function exchangeCodeForToken(string $shop, string $code): array
                             'product_id' => (string) ($item['product_id'] ?? $orderItem->product_id),
                             'barcode' => $barcode ?: $orderItem->barcode,
                             'product_name' => $item['title'] ?? $item['name'] ?? $orderItem->product_name,
+                            'image' => $itemImage ?: $orderItem->image,
                             'quantity' => $item['quantity'] ?? $orderItem->quantity,
                             'unit_price' => $item['price'] ?? $orderItem->unit_price,
                         ]);

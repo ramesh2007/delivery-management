@@ -56,20 +56,71 @@ class ERPNextAuthService
                 ? $responseData['message']
                 : $responseData;
 
-            // Normalize user details
-            $userEmail = $data['email'] ?? $data['user'] ?? $data['user_id'] ?? (filter_var($username, FILTER_VALIDATE_EMAIL) ? $username : null);
-            $userName = $data['full_name'] ?? $data['name'] ?? $data['user_name'] ?? ($userEmail ? explode('@', $userEmail)[0] : $username);
-            $erpnextUserId = $data['user_id'] ?? $data['user'] ?? $userEmail ?? $username;
-            $erpnextUsername = $data['username'] ?? (filter_var($username, FILTER_VALIDATE_EMAIL) ? explode('@', $username)[0] : $username);
+            if (isset($data['success']) && ($data['success'] === false || $data['success'] === 0 || $data['success'] === 'false')) {
+                $errorMessage = $data['message'] ?? 'Invalid ERPNext credentials';
+                throw new Exception(is_string($errorMessage) ? $errorMessage : 'Invalid ERPNext credentials');
+            }
+
+            // Extract nested user_details and user_creds if present
+            $userDetails = (isset($data['user_details']) && is_array($data['user_details'])) ? $data['user_details'] : [];
             $userCreds = (isset($data['user_creds']) && is_array($data['user_creds'])) ? $data['user_creds'] : [];
-            $erpnextApiKey = $data['api_key'] ?? $data['key'] ?? ($userCreds['api_key'] ?? null);
-            $erpnextApiSecret = $data['api_secret'] ?? $data['secret'] ?? ($userCreds['api_secret'] ?? null);
-            $erpnextToken = $data['token'] ?? $data['sid'] ?? ($erpnextApiKey && $erpnextApiSecret ? "token {$erpnextApiKey}:{$erpnextApiSecret}" : null);
+            if (empty($userCreds) && isset($data['data']['user_creds']) && is_array($data['data']['user_creds'])) {
+                $userCreds = $data['data']['user_creds'];
+            }
+
+            // Normalize user details
+            $userEmail = $userDetails['user_id']
+                ?? $userDetails['email']
+                ?? $data['email']
+                ?? $data['user']
+                ?? $data['user_id']
+                ?? (filter_var($username, FILTER_VALIDATE_EMAIL) ? $username : null);
+
+            $userName = $userDetails['user_name']
+                ?? $userDetails['full_name']
+                ?? $userDetails['name']
+                ?? $data['full_name']
+                ?? $data['name']
+                ?? $data['user_name']
+                ?? ($userEmail ? explode('@', $userEmail)[0] : $username);
+
+            $erpnextUserId = $userDetails['user_id']
+                ?? $data['user_id']
+                ?? $data['user']
+                ?? $userEmail
+                ?? $username;
+
+            $erpnextUsername = $userDetails['username']
+                ?? $data['username']
+                ?? (filter_var($username, FILTER_VALIDATE_EMAIL) ? explode('@', $username)[0] : $username);
+
+            // Normalize credentials
+            $erpnextApiKey = $userCreds['api_key']
+                ?? $userCreds['key']
+                ?? $data['api_key']
+                ?? $data['key']
+                ?? null;
+
+            $erpnextApiSecret = $userCreds['api_secret']
+                ?? $userCreds['secret']
+                ?? $data['api_secret']
+                ?? $data['secret']
+                ?? null;
+            
+            if (!empty($erpnextApiKey) && !empty($erpnextApiSecret)) {
+                $erpnextToken = "token {$erpnextApiKey}:{$erpnextApiSecret}";
+            } else {
+                $erpnextToken = $userCreds['token'] ?? $data['token'] ?? $data['sid'] ?? null;
+            }
 
             // Extract roles
             $roles = [];
-            if (isset($data['roles']) && is_array($data['roles'])) {
+            if (!empty($userDetails['roles']) && is_array($userDetails['roles'])) {
+                $roles = $userDetails['roles'];
+            } elseif (!empty($data['roles']) && is_array($data['roles'])) {
                 $roles = $data['roles'];
+            } elseif (isset($userDetails['role'])) {
+                $roles = is_array($userDetails['role']) ? $userDetails['role'] : [$userDetails['role']];
             } elseif (isset($data['role'])) {
                 $roles = is_array($data['role']) ? $data['role'] : [$data['role']];
             } elseif (isset($data['user_roles']) && is_array($data['user_roles'])) {

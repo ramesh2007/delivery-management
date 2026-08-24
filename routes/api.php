@@ -69,6 +69,10 @@ Route::get('/shopify/orders', [ShopifyController::class, 'apiOrders']);
 
 Route::get('/demo/order-management/orders/{order}', [\App\Http\Controllers\Api\ResourceController::class, 'salesOrderDetail'])
     ->where('order', '.*');
+Route::get('/admin/order/{order}', [\App\Http\Controllers\Api\ResourceController::class, 'salesOrderDetail'])
+    ->where('order', '.*');
+Route::get('/order-details/{order}', [\App\Http\Controllers\Api\ResourceController::class, 'salesOrderDetail'])
+    ->where('order', '.*');
 
 // Flutter App Order Management API Endpoints (Sync, Item Status update, Picker Assignment, User Logs)
 Route::get('/orders', [PickerManagementController::class, 'index']);

@@ -10,7 +10,7 @@ use App\Http\Controllers\Api\OrderManagementController;
 use App\Http\Controllers\Api\PackerManagementController;
 use App\Http\Controllers\Api\PickerManagementController;
 use App\Http\Controllers\Api\OrderStatusApiController;
-use App\Http\Controllers\Api\DriverManagementController;
+use App\Http\Controllers\Api\DeliveryManagementController;
 
 use App\Http\Controllers\ShopifyController;
 
@@ -44,20 +44,20 @@ Route::get('/orders/status/delivered', [OrderStatusApiController::class, 'delive
 Route::get('/orders/delivered', [OrderStatusApiController::class, 'delivered']);
 
 // Driver Management & Order Assignment Endpoints (React.js Frontend & Flutter App)
-Route::get('/get-drivers-list', [DriverManagementController::class, 'index']);
-Route::get('/drivers', [DriverManagementController::class, 'index']);
+Route::get('/get-drivers-list', [DeliveryManagementController::class, 'index']);
+Route::get('/drivers', [DeliveryManagementController::class, 'index']);
 
 // React.js API to assign driver to an order
-Route::post('/driver/assign', [DriverManagementController::class, 'assignDriver']);
-Route::post('/orders/assign-driver', [DriverManagementController::class, 'assignDriver']);
+Route::post('/driver/assign', [DeliveryManagementController::class, 'assignDriver']);
+Route::post('/orders/assign-driver', [DeliveryManagementController::class, 'assignDriver']);
 
 // Flutter App API to fetch assigned orders for a driver using driver user id
-Route::get('/driver/assigned-orders/{driver_user_id}', [DriverManagementController::class, 'getAssignedOrders']);
-Route::get('/driver-orders/{driver_user_id}', [DriverManagementController::class, 'getAssignedOrders']);
+Route::get('/driver/assigned-orders/{driver_user_id}', [DeliveryManagementController::class, 'getAssignedOrders']);
+Route::get('/driver-orders/{driver_user_id}', [DeliveryManagementController::class, 'getAssignedOrders']);
 
 // Flutter App API to update driver status (assigned, accepted, started, delivered, cancelled, refund, exchange)
-Route::post('/driver/update-status', [DriverManagementController::class, 'updateDriverStatus']);
-Route::post('/driver-orders/update-status', [DriverManagementController::class, 'updateDriverStatus']);
+Route::post('/driver/update-status', [DeliveryManagementController::class, 'updateDriverStatus']);
+Route::post('/driver-orders/update-status', [DeliveryManagementController::class, 'updateDriverStatus']);
 
 
 
@@ -102,6 +102,31 @@ Route::post('/orders/packer/unassign', [PackerManagementController::class, 'unas
 Route::post('/orders/packer/verify-item', [PackerManagementController::class, 'verifyItemBarcode']);
 Route::post('/orders/packer/complete-packing', [PackerManagementController::class, 'completePacking']);
 
+// Verified Bags API
+Route::post('/orders/packer/verify-bags', [DeliveryManagementController::class, 'verifyBags']);
+Route::post('/orders/verify-bags', [DeliveryManagementController::class, 'verifyBags']);
+Route::get('/orders/verified-bags/{order_number?}', [DeliveryManagementController::class, 'verifyBags']);
+
+//Order Item Driver side
+
+Route::post('/orders/driver/assigned', [DeliveryManagementController::class, 'assignedDriver']);
+Route::post('/orders/driver/accepted', [DeliveryManagementController::class, 'orderAccepted']);
+Route::post('/orders/driver/unaccepted', [DeliveryManagementController::class, 'orderUnaccepted']);
+Route::post('/orders/driver/start-delivery', [DeliveryManagementController::class, 'startDelivery']);
+Route::get('/orders/driver/started/{driver_user_id?}', [DeliveryManagementController::class, 'getStartedOrders']);
+Route::post('/orders/driver/update-status', [DeliveryManagementController::class, 'updateDriverStatus']);
+Route::post('/orders/driver/delivered', [DeliveryManagementController::class, 'orderDelivered']);
+Route::post('/orders/driver/mark-as-delivered', [DeliveryManagementController::class, 'markAsDelivered']);
+Route::post('/orders/driver/mark-delivered', [DeliveryManagementController::class, 'markAsDelivered']);
+Route::post('/orders/driver/cancelled', [DeliveryManagementController::class, 'orderCancelled']);
+Route::post('/orders/driver/refund', [DeliveryManagementController::class, 'orderRefund']);
+Route::post('/orders/driver/exchange', [DeliveryManagementController::class, 'orderExchange']);
+Route::post('/orders/driver/flag', [DeliveryManagementController::class, 'flagDelivery']);
+Route::post('/orders/driver/flag-delivery', [DeliveryManagementController::class, 'flagDelivery']);
+Route::get('/orders/driver/flagged/{driver_user_id?}', [DeliveryManagementController::class, 'getFlaggedOrders']);
+Route::get('/orders/driver/flagged-orders/{driver_user_id?}', [DeliveryManagementController::class, 'getFlaggedOrders']);
+Route::get('/orders/driver/discrepancies/{driver_user_id?}', [DeliveryManagementController::class, 'getDeliveryDiscrepancies']);
+
 // Order Item Discrepancy & Flagging Endpoints
 Route::post('/orders/items/flag-discrepancy', [OrderManagementController::class, 'flagItemDiscrepancy']);
 Route::get('/orders/items/discrepancies', [OrderManagementController::class, 'getDiscrepancies']);
@@ -114,15 +139,15 @@ Route::get('/orders/{id}/logs', [OrderManagementController::class, 'getLogs']);
 Route::middleware('auth:sanctum')->group(function () {
     Route::post('/logout', [AuthController::class, 'logout']);
     Route::post('/change-password', [AuthController::class, 'changePassword']);
-    
+
     // User status list routes
     Route::get('/users/active', [UserController::class, 'activeUsers']);
     Route::get('/users/inactive', [UserController::class, 'inactiveUsers']);
-    
+
     // User CRUD routes (excluding store since it is public registration)
     Route::apiResource('users', UserController::class)->except(['store']);
     Route::post('/users/{id}/roles', [UserController::class, 'assignRoles']);
-    
+
     // Role CRUD & Assignment routes
     Route::apiResource('roles', RoleController::class);
     Route::post('/roles/{id}/permissions', [RoleController::class, 'assignPermissions']);
@@ -148,6 +173,6 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/resource/Sales Order', [\App\Http\Controllers\Api\ResourceController::class, 'salesOrder']);
     Route::any('/resource/Sales Order/{orderId}', [\App\Http\Controllers\Api\ResourceController::class, 'salesOrderDetail'])
         ->where('orderId', '.*');
-   
+
 
 });

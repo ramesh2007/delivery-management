@@ -11,15 +11,17 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::create('shopify_stores', function (Blueprint $table) {
-            $table->id();
-            $table->string('shop')->unique();
-            $table->text('access_token')->nullable();
-            $table->string('scopes')->nullable();
-            $table->boolean('is_active')->default(true);
-            $table->timestamp('last_synced_at')->nullable();
-            $table->timestamps();
-        });
+        if (!Schema::hasTable('shopify_stores')) {
+            Schema::create('shopify_stores', function (Blueprint $table) {
+                $table->id();
+                $table->string('shop')->unique();
+                $table->text('access_token')->nullable();
+                $table->string('scopes')->nullable();
+                $table->boolean('is_active')->default(true);
+                $table->timestamp('last_synced_at')->nullable();
+                $table->timestamps();
+            });
+        }
     }
 
     /**

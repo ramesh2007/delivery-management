@@ -27,6 +27,7 @@ class OrderItemPickedOrderStatusTest extends TestCase
             'product_code' => 'P101',
             'product_name' => 'Item 1',
             'status' => 'pending',
+            'assigned_to' => $user->id,
         ]);
 
         $item2 = OrderItem::create([
@@ -35,6 +36,7 @@ class OrderItemPickedOrderStatusTest extends TestCase
             'product_code' => 'P102',
             'product_name' => 'Item 2',
             'status' => 'pending',
+            'assigned_to' => $user->id,
         ]);
 
         $item3 = OrderItem::create([
@@ -43,6 +45,7 @@ class OrderItemPickedOrderStatusTest extends TestCase
             'product_code' => 'P103',
             'product_name' => 'Item 3',
             'status' => 'pending',
+            'assigned_to' => $user->id,
         ]);
 
         $item4 = OrderItem::create([
@@ -51,6 +54,7 @@ class OrderItemPickedOrderStatusTest extends TestCase
             'product_code' => 'P104',
             'product_name' => 'Item 4',
             'status' => 'pending',
+            'assigned_to' => $user->id,
         ]);
 
         // Step 1: Pick 3 out of 4 items

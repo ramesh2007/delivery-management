@@ -18,6 +18,7 @@ class OrderItem extends Model
         'product_code',
         'barcode',
         'product_name',
+        'image',
         'quantity',
         'unit_price',
         'status',

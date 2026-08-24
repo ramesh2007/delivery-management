@@ -11,20 +11,24 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::create('packer_verifications', function (Blueprint $table) {
-            $table->id();
-            $table->foreignId('order_id')->constrained('orders')->onDelete('cascade');
-            $table->foreignId('order_item_id')->constrained('order_items')->onDelete('cascade');
-            $table->foreignId('packer_id')->nullable()->constrained('users')->nullOnDelete();
-            $table->string('packer_name')->nullable();
-            $table->string('scanned_barcode');
-            $table->boolean('is_verified')->default(true);
-            $table->timestamp('verified_at')->nullable();
-            $table->timestamps();
-        });
+        if (!Schema::hasTable('packer_verifications')) {
+            Schema::create('packer_verifications', function (Blueprint $table) {
+                $table->id();
+                $table->foreignId('order_id')->constrained('orders')->onDelete('cascade');
+                $table->foreignId('order_item_id')->constrained('order_items')->onDelete('cascade');
+                $table->foreignId('packer_id')->nullable()->constrained('users')->nullOnDelete();
+                $table->string('packer_name')->nullable();
+                $table->string('scanned_barcode');
+                $table->boolean('is_verified')->default(true);
+                $table->timestamp('verified_at')->nullable();
+                $table->timestamps();
+            });
+        }
 
         Schema::table('orders', function (Blueprint $table) {
-            $table->integer('bag_count')->default(0)->after('status');
+            if (!Schema::hasColumn('orders', 'bag_count')) {
+                $table->integer('bag_count')->default(0)->after('status');
+            }
             if (!Schema::hasColumn('orders', 'packed_by')) {
                 $table->foreignId('packed_by')->nullable()->constrained('users')->nullOnDelete()->after('assigned_at');
                 $table->string('packed_user_name')->nullable()->after('packed_by');
@@ -33,10 +37,12 @@ return new class extends Migration
         });
 
         Schema::table('order_items', function (Blueprint $table) {
-            $table->boolean('is_packer_verified')->default(false)->after('status');
-            $table->foreignId('packer_verified_by')->nullable()->constrained('users')->nullOnDelete()->after('is_packer_verified');
-            $table->string('packer_verified_user_name')->nullable()->after('packer_verified_by');
-            $table->timestamp('packer_verified_at')->nullable()->after('packer_verified_user_name');
+            if (!Schema::hasColumn('order_items', 'is_packer_verified')) {
+                $table->boolean('is_packer_verified')->default(false)->after('status');
+                $table->foreignId('packer_verified_by')->nullable()->constrained('users')->nullOnDelete()->after('is_packer_verified');
+                $table->string('packer_verified_user_name')->nullable()->after('packer_verified_by');
+                $table->timestamp('packer_verified_at')->nullable()->after('packer_verified_user_name');
+            }
         });
     }
 

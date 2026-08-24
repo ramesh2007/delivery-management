@@ -11,17 +11,19 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::create('orders', function (Blueprint $table) {
-            $table->id();
-            $table->string('order_number')->unique();
-            $table->string('customer_name')->nullable();
-            $table->string('customer_phone')->nullable();
-            $table->text('delivery_address')->nullable();
-            $table->decimal('total_amount', 10, 2)->default(0.00);
-            $table->enum('status', ['pending', 'picking', 'packed', 'out_for_delivery', 'delivered', 'cancelled'])
-                  ->default('pending');
-            $table->timestamps();
-        });
+        if (!Schema::hasTable('orders')) {
+            Schema::create('orders', function (Blueprint $table) {
+                $table->id();
+                $table->string('order_number')->unique();
+                $table->string('customer_name')->nullable();
+                $table->string('customer_phone')->nullable();
+                $table->text('delivery_address')->nullable();
+                $table->decimal('total_amount', 10, 2)->default(0.00);
+                $table->enum('status', ['pending', 'picking', 'packed', 'out_for_delivery', 'delivered', 'cancelled'])
+                      ->default('pending');
+                $table->timestamps();
+            });
+        }
     }
 
     /**

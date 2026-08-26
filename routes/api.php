@@ -47,9 +47,14 @@ Route::get('/orders/delivered', [OrderStatusApiController::class, 'delivered']);
 Route::get('/get-drivers-list', [DeliveryManagementController::class, 'index']);
 Route::get('/drivers', [DeliveryManagementController::class, 'index']);
 
+// Picker & Packer Management List Endpoints
+Route::get('/get-pickers-list', [PickerManagementController::class, 'getPickersList']);
+Route::get('/get-packers-list', [PackerManagementController::class, 'getPackersList']);
+
 // React.js API to assign driver to an order
 Route::post('/driver/assign', [DeliveryManagementController::class, 'assignDriver']);
 Route::post('/orders/assign-driver', [DeliveryManagementController::class, 'assignDriver']);
+Route::post('/resource/Sales Order/assign-driver', [DeliveryManagementController::class, 'assignDriver']);
 
 // Flutter App API to fetch assigned orders for a driver using driver user id
 Route::get('/driver/assigned-orders/{driver_user_id}', [DeliveryManagementController::class, 'getAssignedOrders']);
@@ -177,6 +182,6 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/resource/Sales Order', [\App\Http\Controllers\Api\ResourceController::class, 'salesOrder']);
     Route::any('/resource/Sales Order/{orderId}', [\App\Http\Controllers\Api\ResourceController::class, 'salesOrderDetail'])
         ->where('orderId', '.*');
-
-
 });
+
+

@@ -8,8 +8,10 @@ use App\Models\OrderItem;
 use App\Models\OrderPackerAssigned;
 use App\Models\OrderStatusLog;
 use App\Models\PackerVerification;
+use App\Models\User;
 use App\Services\ShopifyService;
 use Illuminate\Http\Request;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
@@ -956,5 +958,35 @@ class PackerManagementController extends Controller
             'logs' => $order->logs,
             'created_at' => $order->created_at->toIso8601String(),
         ];
+    }
+
+    /**
+     * Get list of packers from users table.
+     * Route: GET /api/packers
+     * Route: GET /api/get-packers-list
+     * Route: GET /api/users/packers
+     */
+    public function getPackersList(): JsonResponse
+    {
+        try {
+            $packers = User::where('role', 'packer')
+                ->orWhere('role', 'Packer')
+                ->orWhereHas('roles', function ($query) {
+                    $query->whereIn('name', ['packer', 'Packer']);
+                })
+                ->get();
+
+            return response()->json([
+                'status' => 'success',
+                'message' => 'Packers list retrieved successfully.',
+                'count' => $packers->count(),
+                'data' => $packers
+            ], 200);
+        } catch (\Exception $e) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Failed to fetch packers list: ' . $e->getMessage()
+            ], 500);
+        }
     }
 }

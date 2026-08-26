@@ -6,8 +6,10 @@ use App\Http\Controllers\Controller;
 use App\Models\Order;
 use App\Models\OrderItem;
 use App\Models\OrderStatusLog;
+use App\Models\User;
 use App\Services\ShopifyService;
 use Illuminate\Http\Request;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
@@ -1568,5 +1570,35 @@ class PickerManagementController extends Controller
             })->values(),
             'created_at' => $order->created_at ? $order->created_at->toIso8601String() : null,
         ];
+    }
+
+    /**
+     * Get list of pickers from users table.
+     * Route: GET /api/pickers
+     * Route: GET /api/get-pickers-list
+     * Route: GET /api/users/pickers
+     */
+    public function getPickersList(): JsonResponse
+    {
+        try {
+            $pickers = User::where('role', 'picker')
+                ->orWhere('role', 'Picker')
+                ->orWhereHas('roles', function ($query) {
+                    $query->whereIn('name', ['picker', 'Picker']);
+                })
+                ->get();
+
+            return response()->json([
+                'status' => 'success',
+                'message' => 'Pickers list retrieved successfully.',
+                'count' => $pickers->count(),
+                'data' => $pickers
+            ], 200);
+        } catch (\Exception $e) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Failed to fetch pickers list: ' . $e->getMessage()
+            ], 500);
+        }
     }
 }

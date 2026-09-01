@@ -426,6 +426,19 @@ class PickerManagementController extends Controller
     public function apiOrdersById(Request $request, $id)
     {
         $idStr = trim((string) $id);
+        $cleanId = ltrim($idStr, '#');
+
+        // Check if $id refers to a specific Order ID or Order Number directly
+        $orderMatch = Order::where('id', $idStr)
+            ->orWhere('order_number', $idStr)
+            ->orWhere('order_number', $cleanId)
+            ->orWhere('order_number', '#' . $cleanId)
+            ->first();
+
+        if ($orderMatch) {
+            $resourceController = app(\App\Http\Controllers\Api\ResourceController::class);
+            return $resourceController->salesOrderDetail($idStr);
+        }
 
         // Auto-sync orders from Shopify silently
         if ($request->boolean('auto_sync', true)) {
@@ -436,6 +449,19 @@ class PickerManagementController extends Controller
             }
         }
 
+        // Re-check single order match after sync
+        $orderMatchAfterSync = Order::where('id', $idStr)
+            ->orWhere('order_number', $idStr)
+            ->orWhere('order_number', $cleanId)
+            ->orWhere('order_number', '#' . $cleanId)
+            ->first();
+
+        if ($orderMatchAfterSync) {
+            $resourceController = app(\App\Http\Controllers\Api\ResourceController::class);
+            return $resourceController->salesOrderDetail($idStr);
+        }
+
+        // Check for orders assigned to user_id
         $userOrders = Order::with([
             'items' => function ($q) use ($idStr) {
                 $q->where('assigned_to', $idStr)
@@ -490,10 +516,9 @@ class PickerManagementController extends Controller
             ]);
         }
 
-        return response()->json([
-            'success' => true,
-            'data' => [],
-        ]);
+        // Fallback: lookup single order details via ResourceController
+        $resourceController = app(\App\Http\Controllers\Api\ResourceController::class);
+        return $resourceController->salesOrderDetail($idStr);
     }
 
     /**
@@ -561,19 +586,30 @@ class PickerManagementController extends Controller
         }
 
         $user = Auth::user();
-        $userId = $user ? $user->id : $request->input('user_id');
-
-        $dbUser = null;
-        if ($userId) {
-            $dbUser = \App\Models\User::find($userId);
+        $userId = $user ? $user->id : ($request->input('picker_id') ?? $request->input('user_id') ?? $request->input('assigned_to'));
+        if ($userId && is_numeric($userId)) {
+            $userId = (int) $userId;
         }
 
-        $userName = $user ? $user->name : ($dbUser ? $dbUser->name : ($request->input('user_name') ?? 'Picker User'));
+        $dbUser = $userId ? \App\Models\User::find($userId) : null;
+        $userName = $user ? $user->name : ($dbUser ? $dbUser->name : ($request->input('picker_name') ?? $request->input('user_name')));
+
+        if (!$userId && $userName) {
+            $foundUser = \App\Models\User::where('name', 'like', "%{$userName}%")->first();
+            if ($foundUser) {
+                $userId = $foundUser->id;
+                $userName = $foundUser->name;
+            }
+        }
+
+        if (!$userName) {
+            $userName = 'Picker User';
+        }
 
         if (!$userId && !$userName) {
             return response()->json([
                 'success' => false,
-                'message' => 'User identification required. Pass user_id, user_name, or authenticate with Sanctum.',
+                'message' => 'User identification required. Pass user_id, picker_id, assigned_to, user_name, or authenticate with Sanctum.',
             ], 422);
         }
 
@@ -678,24 +714,25 @@ class PickerManagementController extends Controller
         }
 
         $authUser = Auth::user();
-
-        $userId = $authUser
-            ? $authUser->id
-            : $request->input('user_id');
-
-        $dbUser = null;
-
-        if ($userId) {
-            $dbUser = \App\Models\User::find($userId);
+        $userId = $authUser ? $authUser->id : ($request->input('picker_id') ?? $request->input('user_id') ?? $request->input('assigned_to'));
+        if ($userId && is_numeric($userId)) {
+            $userId = (int) $userId;
         }
 
-        $userName = $authUser
-            ? $authUser->name
-            : (
-                $dbUser
-                    ? $dbUser->name
-                    : ($request->input('user_name') ?? 'Picker User')
-            );
+        $dbUser = $userId ? \App\Models\User::find($userId) : null;
+        $userName = $authUser ? $authUser->name : ($dbUser ? $dbUser->name : ($request->input('picker_name') ?? $request->input('user_name')));
+
+        if (!$userId && $userName) {
+            $foundUser = \App\Models\User::where('name', 'like', "%{$userName}%")->first();
+            if ($foundUser) {
+                $userId = $foundUser->id;
+                $userName = $foundUser->name;
+            }
+        }
+
+        if (!$userName) {
+            $userName = 'Picker User';
+        }
 
         if (!$userId && !$userName) {
             return response()->json([
@@ -859,13 +896,11 @@ class PickerManagementController extends Controller
                 ]);
             }
 
-            if (!$order->assigned_to) {
-                $order->update([
-                    'assigned_to' => $userId,
-                    'assigned_user_name' => $userName,
-                    'assigned_at' => now(),
-                ]);
-            }
+            $order->update([
+                'assigned_to' => $userId,
+                'assigned_user_name' => $userName,
+                'assigned_at' => now(),
+            ]);
 
             if ($order->status === 'pending') {
                 $order->update([
@@ -1300,6 +1335,614 @@ class PickerManagementController extends Controller
     }
 
     /**
+     * Helper to extract order item IDs / line item IDs from flexible input types (array of IDs, strings, or objects).
+     */
+    protected function extractItemIdentifiers($itemsInput): array
+    {
+        $itemIds = [];
+        $lineItemIds = [];
+
+        if (!is_array($itemsInput)) {
+            return ['item_ids' => [], 'line_item_ids' => []];
+        }
+
+        foreach ($itemsInput as $raw) {
+            if (is_numeric($raw) || is_string($raw)) {
+                $val = trim((string) $raw);
+                if ($val !== '' && $val !== '*' && strtolower($val) !== 'all') {
+                    if (is_numeric($val)) {
+                        $itemIds[] = (int) $val;
+                    }
+                    $lineItemIds[] = $val;
+                }
+            } elseif (is_array($raw)) {
+                if (isset($raw['id']) && $raw['id'] !== null && $raw['id'] !== '') {
+                    if (is_numeric($raw['id'])) {
+                        $itemIds[] = (int) $raw['id'];
+                    }
+                    $lineItemIds[] = (string) $raw['id'];
+                }
+                if (isset($raw['order_item_id']) && $raw['order_item_id'] !== null && $raw['order_item_id'] !== '') {
+                    if (is_numeric($raw['order_item_id'])) {
+                        $itemIds[] = (int) $raw['order_item_id'];
+                    }
+                    $lineItemIds[] = (string) $raw['order_item_id'];
+                }
+                if (isset($raw['line_item_id']) && $raw['line_item_id'] !== null && $raw['line_item_id'] !== '') {
+                    $lineItemIds[] = (string) $raw['line_item_id'];
+                    if (is_numeric($raw['line_item_id'])) {
+                        $itemIds[] = (int) $raw['line_item_id'];
+                    }
+                }
+                if (isset($raw['item_id']) && $raw['item_id'] !== null && $raw['item_id'] !== '') {
+                    if (is_numeric($raw['item_id'])) {
+                        $itemIds[] = (int) $raw['item_id'];
+                    }
+                    $lineItemIds[] = (string) $raw['item_id'];
+                }
+            }
+        }
+
+        return [
+            'item_ids' => array_values(array_unique($itemIds)),
+            'line_item_ids' => array_values(array_unique($lineItemIds)),
+        ];
+    }
+
+    /**
+     * Helper to resolve User ID and User Name from various request inputs by ID, email, or name.
+     */
+    protected function resolvePickerUser($rawId = null, $rawName = null, $rawEmail = null): array
+    {
+        $userId = null;
+        $userName = $rawName;
+        $userEmail = $rawEmail;
+
+        if ($rawId && is_numeric($rawId)) {
+            $userId = (int) $rawId;
+        } elseif ($rawId && is_string($rawId)) {
+            if (filter_var($rawId, FILTER_VALIDATE_EMAIL)) {
+                $userEmail = $userEmail ?: $rawId;
+            } else {
+                $userName = $userName ?: $rawId;
+            }
+        }
+
+        // If numeric user ID was provided, verify user exists in users table
+        if ($userId) {
+            $user = \App\Models\User::find($userId);
+            if ($user) {
+                return [
+                    'id' => $user->id,
+                    'name' => $user->name,
+                ];
+            }
+        }
+
+        // Search users table by email or name if user ID is missing/not found
+        if (!empty($userEmail) || !empty($userName)) {
+            $foundUser = \App\Models\User::query()
+                ->where(function ($q) use ($userEmail, $userName) {
+                    if (!empty($userEmail)) {
+                        $q->where('email', $userEmail);
+                    }
+                    if (!empty($userName)) {
+                        if (!empty($userEmail)) {
+                            $q->orWhere('email', $userName)
+                              ->orWhere('name', $userName)
+                              ->orWhere('name', 'like', "%{$userName}%");
+                        } else {
+                            $q->where('email', $userName)
+                              ->orWhere('name', $userName)
+                              ->orWhere('name', 'like', "%{$userName}%");
+                        }
+                    }
+                })
+                ->first();
+
+            if ($foundUser) {
+                return [
+                    'id' => $foundUser->id,
+                    'name' => $foundUser->name,
+                ];
+            }
+        }
+
+        return [
+            'id' => $userId,
+            'name' => $userName,
+        ];
+    }
+
+    /**
+     * Assign an order to picker with order items specified in an array.
+     * Supports both single order payload and batch array of orders.
+     * Route: POST /api/orders/assign-picker-items
+     * Route: POST /api/orders/picker/assign-items
+     * Route: POST /api/orders/assign-with-items
+     */
+    public function assignOrderWithItems(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'orders' => 'nullable|array',
+            'order_id' => 'required_without:orders',
+            'order_items' => 'nullable|array',
+            'order_item_ids' => 'nullable|array',
+            'items' => 'nullable|array',
+            'line_item_ids' => 'nullable|array',
+            'picker_id' => 'nullable',
+            'user_id' => 'nullable',
+            'assigned_to' => 'nullable',
+            'picker_name' => 'nullable|string',
+            'user_name' => 'nullable|string',
+            'picker_email' => 'nullable|string',
+            'user_email' => 'nullable|string',
+            'email' => 'nullable|string',
+            'notes' => 'nullable|string',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        // Global / fallback picker user identification
+        $authUser = Auth::user();
+        $globalUserId = $authUser ? $authUser->id : null;
+        $globalUserName = $authUser ? $authUser->name : null;
+
+        if (!$globalUserId) {
+            $rawId = $request->input('picker_id') ?? $request->input('user_id') ?? $request->input('assigned_to');
+            $rawName = $request->input('picker_name') ?? $request->input('user_name') ?? $request->input('name');
+            $rawEmail = $request->input('picker_email') ?? $request->input('user_email') ?? $request->input('email');
+
+            $resolved = $this->resolvePickerUser($rawId, $rawName, $rawEmail);
+            $globalUserId = $resolved['id'];
+            $globalUserName = $resolved['name'];
+        }
+
+        if (!$globalUserId && !$globalUserName) {
+            return response()->json([
+                'success' => false,
+                'message' => 'User identification required. Please pass picker_id, user_id, assigned_to, user_email, or user_name.',
+            ], 422);
+        }
+
+        return DB::transaction(function () use ($request, $authUser, $globalUserId, $globalUserName) {
+            // Prepare order entries to process
+            $ordersPayload = [];
+            if ($request->filled('orders') && is_array($request->input('orders'))) {
+                $ordersPayload = $request->input('orders');
+            } else {
+                $itemsInput = $request->input('order_items')
+                    ?? $request->input('order_item_ids')
+                    ?? $request->input('items')
+                    ?? $request->input('line_item_ids')
+                    ?? [];
+
+                $ordersPayload[] = [
+                    'order_id' => $request->input('order_id'),
+                    'order_items' => $itemsInput,
+                    'picker_id' => $request->input('picker_id') ?? $request->input('user_id') ?? $request->input('assigned_to'),
+                    'picker_name' => $request->input('picker_name') ?? $request->input('user_name'),
+                    'picker_email' => $request->input('picker_email') ?? $request->input('user_email') ?? $request->input('email'),
+                ];
+            }
+
+            $processedOrders = [];
+            $totalAssignedItemsCount = 0;
+
+            foreach ($ordersPayload as $orderEntry) {
+                $orderIdRaw = trim((string) ($orderEntry['order_id'] ?? $orderEntry['id'] ?? ''));
+                if (empty($orderIdRaw)) {
+                    continue;
+                }
+
+                // Resolve per-entry picker user ID & name from users table if not numeric ID
+                $rawEntryId = $orderEntry['picker_id'] ?? $orderEntry['user_id'] ?? $orderEntry['assigned_to'] ?? null;
+                $rawEntryName = $orderEntry['picker_name'] ?? $orderEntry['user_name'] ?? $orderEntry['name'] ?? null;
+                $rawEntryEmail = $orderEntry['picker_email'] ?? $orderEntry['user_email'] ?? $orderEntry['email'] ?? null;
+
+                $entryUserId = null;
+                $entryUserName = null;
+
+                if ($rawEntryId || $rawEntryName || $rawEntryEmail) {
+                    $resolvedEntry = $this->resolvePickerUser($rawEntryId, $rawEntryName, $rawEntryEmail);
+                    $entryUserId = $resolvedEntry['id'];
+                    $entryUserName = $resolvedEntry['name'];
+                }
+
+                if (!$entryUserId) {
+                    $entryUserId = $globalUserId;
+                }
+                if (!$entryUserName) {
+                    $entryUserName = $globalUserName ?: 'Picker User';
+                }
+
+                $cleanOrderId = ltrim($orderIdRaw, '#');
+                $order = Order::with('items')
+                    ->where(function ($q) use ($orderIdRaw, $cleanOrderId) {
+                        $q->where('id', $orderIdRaw)
+                          ->orWhere('order_number', $orderIdRaw)
+                          ->orWhere('order_number', $cleanOrderId)
+                          ->orWhere('order_number', '#' . $cleanOrderId);
+                    })
+                    ->first();
+
+                if (!$order) {
+                    try {
+                        $this->shopifyService->syncOrdersToDatabase();
+                        $order = Order::with('items')
+                            ->where(function ($q) use ($orderIdRaw, $cleanOrderId) {
+                                $q->where('id', $orderIdRaw)
+                                  ->orWhere('order_number', $orderIdRaw)
+                                  ->orWhere('order_number', $cleanOrderId)
+                                  ->orWhere('order_number', '#' . $cleanOrderId);
+                            })
+                            ->first();
+                    } catch (\Exception $e) {
+                        // Continue if offline
+                    }
+                }
+
+                if (!$order) {
+                    if (count($ordersPayload) === 1) {
+                        return response()->json([
+                            'success' => false,
+                            'message' => "Order '{$orderIdRaw}' not found in system.",
+                        ], 404);
+                    }
+                    continue;
+                }
+
+                // Extract item identifiers
+                $itemsInput = $orderEntry['order_items']
+                    ?? $orderEntry['order_item_ids']
+                    ?? $orderEntry['items']
+                    ?? $orderEntry['line_item_ids']
+                    ?? [];
+
+                $parsedIds = $this->extractItemIdentifiers($itemsInput);
+                $itemIds = $parsedIds['item_ids'];
+                $lineItemIds = $parsedIds['line_item_ids'];
+
+                $itemsQuery = OrderItem::where('order_id', $order->id);
+
+                if (!empty($itemIds) || !empty($lineItemIds)) {
+                    $itemsQuery->where(function ($q) use ($itemIds, $lineItemIds) {
+                        if (!empty($itemIds)) {
+                            $q->orWhereIn('id', $itemIds);
+                        }
+                        if (!empty($lineItemIds)) {
+                            $q->orWhereIn('line_item_id', $lineItemIds);
+                        }
+                    });
+                }
+
+                $items = $itemsQuery->get();
+
+                if ($items->isEmpty()) {
+                    if (count($ordersPayload) === 1) {
+                        return response()->json([
+                            'success' => false,
+                            'message' => 'No matching order items found for this order.',
+                        ], 404);
+                    }
+                    continue;
+                }
+
+                $assignedItems = collect();
+                $oldOrderStatus = $order->status;
+
+                foreach ($items as $item) {
+                    $oldItemStatus = $item->status;
+
+                    $item->update([
+                        'assigned_to' => $entryUserId,
+                        'assigned_user_name' => $entryUserName,
+                        'assigned_at' => now(),
+                    ]);
+
+                    $assignedItems->push($item->fresh());
+
+                    OrderStatusLog::create([
+                        'order_id' => $order->id,
+                        'order_item_id' => $item->id,
+                        'user_id' => $entryUserId,
+                        'user_name' => $entryUserName,
+                        'action' => 'item_assigned_to_picker',
+                        'old_status' => $oldItemStatus,
+                        'new_status' => $oldItemStatus,
+                        'notes' => $request->input('notes', "Assigned item {$item->product_name} to picker {$entryUserName}"),
+                    ]);
+                }
+
+                // Update order assigned_to column with user ID and user name
+                $order->update([
+                    'assigned_to' => $entryUserId,
+                    'assigned_user_name' => $entryUserName,
+                    'assigned_at' => now(),
+                ]);
+
+                if ($order->status === 'pending') {
+                    $order->update(['status' => 'picking']);
+                }
+
+                OrderStatusLog::create([
+                    'order_id' => $order->id,
+                    'user_id' => $entryUserId,
+                    'user_name' => $entryUserName,
+                    'action' => 'order_assigned_to_picker',
+                    'old_status' => $oldOrderStatus,
+                    'new_status' => $order->status,
+                    'notes' => $request->input('notes', "Assigned order {$order->order_number} to picker {$entryUserName} with {$assignedItems->count()} item(s)"),
+                ]);
+
+                $totalAssignedItemsCount += $assignedItems->count();
+
+                $processedOrders[] = [
+                    'order_id' => $order->id,
+                    'order_number' => $order->order_number,
+                    'old_status' => $oldOrderStatus,
+                    'new_status' => $order->status,
+                    'assigned_to' => $order->assigned_to,
+                    'assigned_user_name' => $order->assigned_user_name,
+                    'assigned_at' => $order->assigned_at ? $order->assigned_at->toIso8601String() : null,
+                    'assigned_items_count' => $assignedItems->count(),
+                    'assigned_items' => $assignedItems,
+                ];
+            }
+
+            return response()->json([
+                'success' => true,
+                'message' => "Order(s) successfully assigned to picker with order items.",
+                'data' => [
+                    'picker' => [
+                        'id' => $globalUserId,
+                        'name' => $globalUserName,
+                    ],
+                    'assigned_orders_count' => count($processedOrders),
+                    'total_assigned_items_count' => $totalAssignedItemsCount,
+                    'orders' => $processedOrders,
+                ],
+            ]);
+        });
+    }
+
+    /**
+     * Unassign an order with order items (in array) which is assigned to picker.
+     * Route: POST /api/orders/unassign-picker-items
+     * Route: POST /api/orders/picker/unassign-items
+     * Route: POST /api/orders/unassign-with-items
+     */
+    public function unassignOrderWithItems(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'orders' => 'nullable|array',
+            'order_id' => 'required_without:orders',
+            'order_items' => 'nullable|array',
+            'order_item_ids' => 'nullable|array',
+            'items' => 'nullable|array',
+            'line_item_ids' => 'nullable|array',
+            'picker_id' => 'nullable',
+            'user_id' => 'nullable',
+            'user_name' => 'nullable|string',
+            'notes' => 'nullable|string',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        $authUser = Auth::user();
+        $userId = $authUser ? $authUser->id : ($request->input('picker_id') ?? $request->input('user_id'));
+        if ($userId && is_numeric($userId)) {
+            $userId = (int) $userId;
+        }
+
+        $dbUser = $userId ? \App\Models\User::find($userId) : null;
+        $userName = $authUser ? $authUser->name : ($dbUser ? $dbUser->name : ($request->input('user_name') ?? 'System User'));
+
+        return DB::transaction(function () use ($request, $userId, $userName) {
+            $ordersPayload = [];
+            if ($request->filled('orders') && is_array($request->input('orders'))) {
+                $ordersPayload = $request->input('orders');
+            } else {
+                $itemsInput = $request->input('order_items')
+                    ?? $request->input('order_item_ids')
+                    ?? $request->input('items')
+                    ?? $request->input('line_item_ids')
+                    ?? [];
+
+                $ordersPayload[] = [
+                    'order_id' => $request->input('order_id'),
+                    'order_items' => $itemsInput,
+                ];
+            }
+
+            $processedOrders = [];
+            $totalUnassignedItemsCount = 0;
+
+            foreach ($ordersPayload as $orderEntry) {
+                $orderIdRaw = trim((string) ($orderEntry['order_id'] ?? $orderEntry['id'] ?? ''));
+                if (empty($orderIdRaw)) {
+                    continue;
+                }
+
+                $cleanOrderId = ltrim($orderIdRaw, '#');
+                $order = Order::with('items')
+                    ->where(function ($q) use ($orderIdRaw, $cleanOrderId) {
+                        $q->where('id', $orderIdRaw)
+                          ->orWhere('order_number', $orderIdRaw)
+                          ->orWhere('order_number', $cleanOrderId)
+                          ->orWhere('order_number', '#' . $cleanOrderId);
+                    })
+                    ->first();
+
+                if (!$order) {
+                    try {
+                        $this->shopifyService->syncOrdersToDatabase();
+                        $order = Order::with('items')
+                            ->where(function ($q) use ($orderIdRaw, $cleanOrderId) {
+                                $q->where('id', $orderIdRaw)
+                                  ->orWhere('order_number', $orderIdRaw)
+                                  ->orWhere('order_number', $cleanOrderId)
+                                  ->orWhere('order_number', '#' . $cleanOrderId);
+                            })
+                            ->first();
+                    } catch (\Exception $e) {
+                        // Ignore sync exception if offline
+                    }
+                }
+
+                if (!$order) {
+                    if (count($ordersPayload) === 1) {
+                        return response()->json([
+                            'success' => false,
+                            'message' => "Order '{$orderIdRaw}' not found in system.",
+                        ], 404);
+                    }
+                    continue;
+                }
+
+                $itemsInput = $orderEntry['order_items']
+                    ?? $orderEntry['order_item_ids']
+                    ?? $orderEntry['items']
+                    ?? $orderEntry['line_item_ids']
+                    ?? [];
+
+                $parsedIds = $this->extractItemIdentifiers($itemsInput);
+                $itemIds = $parsedIds['item_ids'];
+                $lineItemIds = $parsedIds['line_item_ids'];
+
+                $itemsQuery = OrderItem::where('order_id', $order->id);
+
+                if (!empty($itemIds) || !empty($lineItemIds)) {
+                    $itemsQuery->where(function ($q) use ($itemIds, $lineItemIds) {
+                        if (!empty($itemIds)) {
+                            $q->orWhereIn('id', $itemIds);
+                        }
+                        if (!empty($lineItemIds)) {
+                            $q->orWhereIn('line_item_id', $lineItemIds);
+                        }
+                    });
+                }
+
+                $items = $itemsQuery->get();
+
+                if ($items->isEmpty()) {
+                    if (count($ordersPayload) === 1) {
+                        return response()->json([
+                            'success' => false,
+                            'message' => 'No matching order items found for this order.',
+                        ], 404);
+                    }
+                    continue;
+                }
+
+                $unassignedItems = collect();
+                $skippedItems = collect();
+
+                foreach ($items as $item) {
+                    $isPicked = in_array($item->status, ['picked', 'packed', 'delivered']) || !is_null($item->picked_by);
+
+                    if ($isPicked) {
+                        $skippedItems->push([
+                            'item_id' => $item->id,
+                            'line_item_id' => $item->line_item_id,
+                            'product_name' => $item->product_name,
+                            'status' => $item->status,
+                            'reason' => 'Item has already been picked/packed and cannot be unassigned.',
+                        ]);
+                    } else {
+                        $oldItemStatus = $item->status;
+                        $item->update([
+                            'assigned_to' => null,
+                            'assigned_user_name' => null,
+                            'assigned_at' => null,
+                            'status' => ($item->status === 'picking') ? 'pending' : $item->status,
+                        ]);
+
+                        $unassignedItems->push($item->fresh());
+
+                        OrderStatusLog::create([
+                            'order_id' => $order->id,
+                            'order_item_id' => $item->id,
+                            'user_id' => $userId,
+                            'user_name' => $userName,
+                            'action' => 'item_unassigned_from_picker',
+                            'old_status' => $oldItemStatus,
+                            'new_status' => $item->status,
+                            'notes' => $request->input('notes', "Unassigned item {$item->product_name} from picker"),
+                        ]);
+                    }
+                }
+
+                // Evaluate order assignment status after items unassignment
+                $allItems = OrderItem::where('order_id', $order->id)->get();
+                $hasAssignedItems = $allItems->whereNotNull('assigned_to')->count() > 0 || $allItems->whereNotNull('assigned_user_name')->count() > 0;
+                $hasPickedItems = $allItems->whereIn('status', ['picked', 'packed', 'delivered'])->count() > 0;
+
+                $oldOrderStatus = $order->status;
+                if (!$hasAssignedItems && !$hasPickedItems) {
+                    $order->update([
+                        'assigned_to' => null,
+                        'assigned_user_name' => null,
+                        'assigned_at' => null,
+                        'status' => ($order->status === 'picking') ? 'pending' : $order->status,
+                    ]);
+
+                    OrderStatusLog::create([
+                        'order_id' => $order->id,
+                        'user_id' => $userId,
+                        'user_name' => $userName,
+                        'action' => 'order_unassigned_from_picker',
+                        'old_status' => $oldOrderStatus,
+                        'new_status' => $order->status,
+                        'notes' => $request->input('notes', "Unassigned order {$order->order_number} as all items are now unassigned"),
+                    ]);
+                } elseif (!$hasAssignedItems) {
+                    $order->update([
+                        'assigned_to' => null,
+                        'assigned_user_name' => null,
+                        'assigned_at' => null,
+                    ]);
+                }
+
+                $totalUnassignedItemsCount += $unassignedItems->count();
+
+                $processedOrders[] = [
+                    'order_id' => $order->id,
+                    'order_number' => $order->order_number,
+                    'old_status' => $oldOrderStatus,
+                    'new_status' => $order->status,
+                    'assigned_to' => $order->assigned_to,
+                    'assigned_user_name' => $order->assigned_user_name,
+                    'unassigned_items_count' => $unassignedItems->count(),
+                    'unassigned_items' => $unassignedItems,
+                    'skipped_items' => $skippedItems,
+                ];
+            }
+
+            return response()->json([
+                'success' => true,
+                'message' => "Order items successfully unassigned ({$totalUnassignedItemsCount} item(s) unassigned across " . count($processedOrders) . " order(s)).",
+                'data' => [
+                    'unassigned_orders_count' => count($processedOrders),
+                    'total_unassigned_items_count' => $totalUnassignedItemsCount,
+                    'orders' => $processedOrders,
+                ],
+            ]);
+        });
+    }
+
+
+    /**
      * Update individual item status (picked, packed, delivered) with user log
      * Route: POST /api/orders/items/update-status
      */
@@ -1496,6 +2139,14 @@ class PickerManagementController extends Controller
             'order_number' => $order->order_number,
             'status' => $order->status,
             'bag_count' => (int) ($order->bag_count ?? 0),
+            'assigned_to' => $order->assigned_to ? (int) $order->assigned_to : null,
+            'assigned_user_name' => $order->assigned_user_name ?: ($order->assignedUser->name ?? null),
+            'picked_by' => $order->items->whereNotNull('picked_by')->pluck('picked_by')->first() ? (int) $order->items->whereNotNull('picked_by')->pluck('picked_by')->first() : ($order->assigned_to ? (int) $order->assigned_to : null),
+            'picked_user_name' => $order->assigned_user_name ?: ($order->assignedUser->name ?? null),
+            'packed_by' => $order->items->whereNotNull('packed_by')->pluck('packed_by')->first() ? (int) $order->items->whereNotNull('packed_by')->pluck('packed_by')->first() : null,
+            'packed_user_name' => $order->items->whereNotNull('packed_user_name')->pluck('packed_user_name')->first() ?: ($order->items->map(fn($i) => $i->packedUser->name ?? null)->filter()->first()),
+            'delivered_by' => $order->delivered_by ? (int) $order->delivered_by : null,
+            'delivered_user_name' => $order->delivered_user_name ?: ($order->deliveredUser->name ?? null),
             'assigned_user' => $order->assigned_to ? [
                 'id' => (int) $order->assigned_to,
                 'name' => $order->assignedUser ? $order->assignedUser->name : ($order->assigned_user_name ?? 'Picker User'),
@@ -1541,6 +2192,14 @@ class PickerManagementController extends Controller
                     ] : null,
                     'is_flagged' => $item->is_flagged,
                     'flag_reason' => $item->flag_reason,
+                    'assigned_to' => $item->assigned_to ? (int) $item->assigned_to : null,
+                    'assigned_user_name' => $item->assigned_user_name ?: ($item->assignedUser->name ?? null),
+                    'picked_by' => $item->picked_by ? (int) $item->picked_by : ($item->picked_user_name ?: null),
+                    'picked_user_name' => $item->picked_user_name ?: ($item->pickedUser->name ?? null),
+                    'packed_by' => $item->packed_by ? (int) $item->packed_by : ($item->packed_user_name ?: null),
+                    'packed_user_name' => $item->packed_user_name ?: ($item->packedUser->name ?? null),
+                    'delivered_by' => $item->delivered_by ? (int) $item->delivered_by : ($item->delivered_user_name ?: null),
+                    'delivered_user_name' => $item->delivered_user_name ?: ($item->deliveredUser->name ?? null),
                     'assigned_user' => $item->assigned_to ? [
                         'id' => (int) $item->assigned_to,
                         'name' => $item->assignedUser ? $item->assignedUser->name : ($item->assigned_user_name ?? 'Picker User'),

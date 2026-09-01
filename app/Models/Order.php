@@ -114,5 +114,15 @@ class Order extends Model
     {
         return $this->hasOne(OrderDriverAssigned::class, 'order_id');
     }
+
+    /**
+     * Get the payment tracking details for this order.
+     */
+    public function payment(): HasOne
+    {
+        return $this->hasOne(OrderPayment::class, 'order_id');
+    }
 }
+
+
 

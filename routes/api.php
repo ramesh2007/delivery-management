@@ -40,16 +40,31 @@ Route::get('/orders/packing', [OrderStatusApiController::class, 'packing']);
 Route::get('/orders/status/in-delivery', [OrderStatusApiController::class, 'inDelivery']);
 Route::get('/orders/in-delivery', [OrderStatusApiController::class, 'inDelivery']);
 
-Route::get('/orders/status/delivered', [OrderStatusApiController::class, 'delivered']);
-Route::get('/orders/delivered', [OrderStatusApiController::class, 'delivered']);
+Route::match(['get', 'post'], '/orders/status/delivered', [OrderStatusApiController::class, 'delivered']);
+Route::match(['get', 'post'], '/orders/delivered', [OrderStatusApiController::class, 'delivered']);
+
+Route::get('/orders/installation', [OrderStatusApiController::class, 'installationOrders']);
+Route::get('/orders/cancelled-delivery', [OrderStatusApiController::class, 'cancelledDelivery']);
+Route::get('/orders/status/flagged', [OrderStatusApiController::class, 'flaggedOrders']);
+Route::get('/orders/flagged', [OrderStatusApiController::class, 'flaggedOrders']);
+Route::get('/orders/flagged-items', [OrderStatusApiController::class, 'flaggedOrders']);
 
 // Driver Management & Order Assignment Endpoints (React.js Frontend & Flutter App)
 Route::get('/get-drivers-list', [DeliveryManagementController::class, 'index']);
 Route::get('/drivers', [DeliveryManagementController::class, 'index']);
-
+// Picker & Packer Management List Endpoints
+Route::get('/get-pickers-list', [PickerManagementController::class, 'getPickersList']);
+Route::get('/get-packers-list', [PackerManagementController::class, 'getPackersList']);
 // React.js API to assign driver to an order
 Route::post('/driver/assign', [DeliveryManagementController::class, 'assignDriver']);
 Route::post('/orders/assign-driver', [DeliveryManagementController::class, 'assignDriver']);
+Route::post('/resource/sales-order/assign-driver', [DeliveryManagementController::class, 'assignDriver']);
+
+// Payment Status Update Endpoint
+Route::post('/orders/update-payment-status', [OrderManagementController::class, 'updatePaymentStatus']);
+
+// Create Return / Replacement Endpoint
+Route::post('/orders/return-replacement', [OrderManagementController::class, 'createReturnReplacement']);
 
 // Flutter App API to fetch assigned orders for a driver using driver user id
 Route::get('/driver/assigned-orders/{driver_user_id}', [DeliveryManagementController::class, 'getAssignedOrders']);
@@ -66,6 +81,9 @@ Route::post('/shopify/sync-orders', [OrderManagementController::class, 'syncShop
 Route::get('/shopify/status', [ShopifyController::class, 'apiStatus']);
 Route::get('/shopify/products', [ShopifyController::class, 'apiProducts']);
 Route::get('/shopify/orders', [ShopifyController::class, 'apiOrders']);
+Route::post('/shopify/webhooks/orders-create', [ShopifyController::class, 'handleOrderWebhook']);
+Route::post('/shopify/webhooks/orders-update', [ShopifyController::class, 'handleOrderWebhook']);
+Route::post('/webhooks/shopify/orders', [ShopifyController::class, 'handleOrderWebhook']);
 
 Route::get('/demo/order-management/orders/{order}', [\App\Http\Controllers\Api\ResourceController::class, 'salesOrderDetail'])
     ->where('order', '.*');
@@ -86,6 +104,15 @@ Route::post('/orders/items/unassign', [PickerManagementController::class, 'unass
 Route::post('/orders/items/unassign-me', [PickerManagementController::class, 'unassignItems']);
 Route::post('/orders/items/update-status', [PickerManagementController::class, 'updateItemStatus']);
 
+// Assign and Unassign Picker with Order Items Array API Endpoints
+Route::post('/orders/assign-picker-items', [PickerManagementController::class, 'assignOrderWithItems']);
+Route::post('/orders/picker/assign-items', [PickerManagementController::class, 'assignOrderWithItems']);
+Route::post('/orders/assign-with-items', [PickerManagementController::class, 'assignOrderWithItems']);
+
+Route::post('/orders/unassign-picker-items', [PickerManagementController::class, 'unassignOrderWithItems']);
+Route::post('/orders/picker/unassign-items', [PickerManagementController::class, 'unassignOrderWithItems']);
+Route::post('/orders/unassign-with-items', [PickerManagementController::class, 'unassignOrderWithItems']);
+
 // Packer Workflow API Endpoints (Assignment, Barcode Verification, Bag Count & Order Lists)
 Route::get('/orders/packer/ready-to-pack', [PackerManagementController::class, 'getPickedOrdersForPacker']);
 Route::get('/orders/packer/picked/{user_id?}', [PackerManagementController::class, 'getPickedOrdersForPacker']);
@@ -102,6 +129,14 @@ Route::post('/orders/packer/assign-me', [PackerManagementController::class, 'ass
 Route::post('/orders/packer/assign', [PackerManagementController::class, 'assignPacker']);
 Route::post('/orders/packer/unassign-me', [PackerManagementController::class, 'unassignPacker']);
 Route::post('/orders/packer/unassign', [PackerManagementController::class, 'unassignPacker']);
+
+Route::post('/orders/assign-packer-items', [PackerManagementController::class, 'assignPackerWithItems']);
+Route::post('/orders/packer/assign-items', [PackerManagementController::class, 'assignPackerWithItems']);
+Route::post('/orders/assign-packer-with-items', [PackerManagementController::class, 'assignPackerWithItems']);
+
+Route::post('/orders/unassign-packer-items', [PackerManagementController::class, 'unassignPackerWithItems']);
+Route::post('/orders/packer/unassign-items', [PackerManagementController::class, 'unassignPackerWithItems']);
+Route::post('/orders/unassign-packer-with-items', [PackerManagementController::class, 'unassignPackerWithItems']);
 
 Route::post('/orders/packer/verify-item', [PackerManagementController::class, 'verifyItemBarcode']);
 Route::post('/orders/packer/complete-packing', [PackerManagementController::class, 'completePacking']);

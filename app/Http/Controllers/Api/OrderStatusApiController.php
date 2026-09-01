@@ -47,6 +47,7 @@ class OrderStatusApiController extends Controller
             'deliveredUser',
             'packerAssignment',
             'driverAssignment',
+            'discrepancies.user',
             'logs.user',
         ]);
 
@@ -55,11 +56,11 @@ class OrderStatusApiController extends Controller
             $search = trim($request->query('search'));
             $query->where(function ($q) use ($search) {
                 $q->where('order_number', 'like', "%{$search}%")
-                  ->orWhere('customer_name', 'like', "%{$search}%")
-                  ->orWhere('customer_phone', 'like', "%{$search}%")
-                  ->orWhere('assigned_user_name', 'like', "%{$search}%")
-                  ->orWhere('packed_user_name', 'like', "%{$search}%")
-                  ->orWhere('delivered_user_name', 'like', "%{$search}%");
+                    ->orWhere('customer_name', 'like', "%{$search}%")
+                    ->orWhere('customer_phone', 'like', "%{$search}%")
+                    ->orWhere('assigned_user_name', 'like', "%{$search}%")
+                    ->orWhere('packed_user_name', 'like', "%{$search}%")
+                    ->orWhere('delivered_user_name', 'like', "%{$search}%");
             });
         }
 
@@ -139,7 +140,7 @@ class OrderStatusApiController extends Controller
         $paginator = $this->getBaseOrderQuery($request)
             ->where(function ($q) {
                 $q->where('status', 'ready_to_assign')
-                  ->orWhere('status', 'packed');
+                    ->orWhere('status', 'packed');
             })
             ->whereNull('delivered_by')
             ->whereDoesntHave('driverAssignment')
@@ -165,10 +166,10 @@ class OrderStatusApiController extends Controller
         $paginator = $this->getBaseOrderQuery($request)
             ->where(function ($q) {
                 $q->where('status', 'picking')
-                  ->orWhere(function ($sub) {
-                      $sub->where('status', 'pending')
-                          ->whereNotNull('assigned_to');
-                  });
+                    ->orWhere(function ($sub) {
+                        $sub->where('status', 'pending')
+                            ->whereNotNull('assigned_to');
+                    });
             })
             ->orderBy('updated_at', 'desc')
             ->paginate($perPage);
@@ -205,8 +206,8 @@ class OrderStatusApiController extends Controller
         $paginator = $this->getBaseOrderQuery($request)
             ->where(function ($q) {
                 $q->where('status', 'packing')
-                  ->orWhere('status', 'packed')
-                  ->orWhereHas('packerAssignment');
+                    ->orWhere('status', 'packed')
+                    ->orWhereHas('packerAssignment');
             })
             ->orderBy('updated_at', 'desc')
             ->paginate($perPage);
@@ -226,7 +227,7 @@ class OrderStatusApiController extends Controller
         $paginator = $this->getBaseOrderQuery($request)
             ->where(function ($q) {
                 $q->whereIn('status', ['assigned_to_driver', 'out_for_delivery', 'in_delivery', 'driver_accepted', 'started'])
-                  ->orWhereHas('driverAssignment');
+                    ->orWhereHas('driverAssignment');
             })
             ->where('status', '!=', 'delivered')
             ->orderBy('updated_at', 'desc')
@@ -236,21 +237,148 @@ class OrderStatusApiController extends Controller
     }
 
     /**
-     * 8. GET /api/orders/delivered or /api/orders/status/delivered
-     * Retrieve completed/delivered orders (status = 'delivered').
+     * 8. GET/POST /api/orders/delivered or /api/orders/status/delivered
+     * Retrieve completed/delivered orders, optionally filtered by driver_id (via query param, body, or route param).
      */
-    public function delivered(Request $request)
+    public function deliveredCompleted(Request $request, $driver_user_id = null)
     {
         $this->handleSilentSync($request);
         $perPage = max(1, min((int) $request->query('per_page', 15), 100));
 
-        $paginator = $this->getBaseOrderQuery($request)
-            ->where('status', 'delivered')
-            ->orderBy('delivered_at', 'desc')
+        $rawJson = json_decode($request->getContent(), true) ?? [];
+
+        $driverId = $driver_user_id
+            ?? $request->input('driver_id')
+            ?? ($rawJson['driver_id'] ?? null)
+            ?? $request->input('driver_user_id')
+            ?? ($rawJson['driver_user_id'] ?? null)
+            ?? $request->input('user_id')
+            ?? ($rawJson['user_id'] ?? null)
+            ?? $request->input('assigned_driver_user_id')
+            ?? ($rawJson['assigned_driver_user_id'] ?? null)
+            ?? $request->query('driver_id')
+            ?? $request->query('driver_user_id')
+            ?? $request->query('user_id');
+
+        $query = $this->getBaseOrderQuery($request)
+            ->where(function ($q) {
+                $q->where('status', 'delivered')
+                    ->orWhereHas('driverAssignment', function ($dq) {
+                        $dq->where('driver_status', 'delivered')
+                            ->orWhere('order_status', 'delivered');
+                    });
+            });
+
+        if (!empty($driverId)) {
+            $query->where(function ($q) use ($driverId) {
+                $q->where('delivered_by', $driverId)
+                    ->orWhereHas('driverAssignment', function ($dq) use ($driverId) {
+                        $dq->where('assigned_driver_user_id', $driverId);
+                    });
+            });
+        }
+
+        $paginator = $query->orderBy('delivered_at', 'desc')
             ->orderBy('updated_at', 'desc')
             ->paginate($perPage);
 
         return $this->buildPaginatedResponse($paginator, 'delivered', 'Delivered orders retrieved successfully.');
+    }
+
+    /**
+     * 9. GET /api/orders/installation or /api/orders/status/installation
+     * Retrieve installation orders list (status = 'installation', 'ready_for_installation', 'in_installation', 'installed', or tagged/containing installation).
+     */
+    public function installationOrders(Request $request)
+    {
+        $this->handleSilentSync($request);
+        $perPage = max(1, min((int) $request->query('per_page', 15), 100));
+
+        $query = $this->getBaseOrderQuery($request);
+
+        // Filter for installation orders
+        if ($request->has('status') && !empty($request->query('status'))) {
+            $query->where('status', $request->query('status'));
+        } else {
+            $query->where(function ($q) {
+                $q->whereIn('status', ['installation', 'ready_for_installation', 'in_installation', 'installed', 'installation_pending'])
+                    ->orWhere('status', 'like', '%install%')
+                    ->orWhereHas('items', function ($iq) {
+                        $iq->where('product_name', 'like', '%install%')
+                            ->orWhere('product_code', 'like', '%install%');
+                    });
+            });
+        }
+
+        $paginator = $query->orderBy('updated_at', 'desc')
+            ->orderBy('created_at', 'desc')
+            ->paginate($perPage);
+
+        return $this->buildPaginatedResponse($paginator, 'installation', 'Installation orders retrieved successfully.');
+    }
+
+    /**
+     * 10. GET /api/orders/cancelled-delivery
+     * Retrieve cancelled delivery orders list (status = 'cancelled', 'delivery_cancelled', 'delivery_failed', or driver assignment status = 'cancelled').
+     */
+    public function cancelledDelivery(Request $request)
+    {
+        $this->handleSilentSync($request);
+        $perPage = max(1, min((int) $request->query('per_page', 15), 100));
+
+        $query = $this->getBaseOrderQuery($request);
+
+        if ($request->has('status') && !empty($request->query('status'))) {
+            $query->where('status', $request->query('status'));
+        } else {
+            $query->where(function ($q) {
+                $q->whereIn('status', ['cancelled', 'delivery_cancelled', 'cancelled_delivery', 'delivery_failed', 'failed'])
+                    ->orWhere('status', 'like', '%cancel%')
+                    ->orWhereHas('driverAssignment', function ($dq) {
+                        $dq->whereIn('driver_status', ['cancelled', 'cancelled_delivery', 'delivery_failed', 'refund', 'failed']);
+                    });
+            });
+        }
+
+        $paginator = $query->orderBy('updated_at', 'desc')
+            ->orderBy('created_at', 'desc')
+            ->paginate($perPage);
+
+        return $this->buildPaginatedResponse($paginator, 'cancelled_delivery', 'Cancelled delivery orders retrieved successfully.');
+    }
+
+    /**
+     * 11. GET /api/orders/flagged or /api/orders/status/flagged
+     * Retrieve all flagged orders list for admin panel (orders with status='flagged', items flagged, or driver assigned flagged).
+     */
+    public function flaggedOrders(Request $request)
+    {
+        $this->handleSilentSync($request);
+        $perPage = max(1, min((int) $request->query('per_page', 15), 100));
+
+        $query = $this->getBaseOrderQuery($request);
+
+        if ($request->has('status') && !empty($request->query('status'))) {
+            $query->where('status', $request->query('status'));
+        } else {
+            $query->where(function ($q) {
+                $q->where('status', 'flagged')
+                    ->orWhereHas('items', function ($iq) {
+                        $iq->where('is_flagged', true);
+                    })
+                    ->orWhereHas('discrepancies')
+                    ->orWhereHas('driverAssignment', function ($dq) {
+                        $dq->where('driver_status', 'flagged')
+                            ->orWhere('order_status', 'flagged');
+                    });
+            });
+        }
+
+        $paginator = $query->orderBy('updated_at', 'desc')
+            ->orderBy('created_at', 'desc')
+            ->paginate($perPage);
+
+        return $this->buildPaginatedResponse($paginator, 'flagged', 'Flagged orders retrieved successfully.');
     }
 
     /**
@@ -313,10 +441,10 @@ class OrderStatusApiController extends Controller
                 'name' => $order->driverAssignment->driver_name,
                 'assigned_at' => $order->driverAssignment->assigned_at ? $order->driverAssignment->assigned_at->toIso8601String() : null,
             ] : (($order->delivered_by || $order->delivered_user_name) ? [
-                'id' => $order->delivered_by ? (int) $order->delivered_by : null,
-                'name' => $order->deliveredUser ? $order->deliveredUser->name : ($order->delivered_user_name ?? 'Driver User'),
-                'delivered_at' => $order->delivered_at ? $order->delivered_at->toIso8601String() : null,
-            ] : null),
+                    'id' => $order->delivered_by ? (int) $order->delivered_by : null,
+                    'name' => $order->deliveredUser ? $order->deliveredUser->name : ($order->delivered_user_name ?? 'Driver User'),
+                    'delivered_at' => $order->delivered_at ? $order->delivered_at->toIso8601String() : null,
+                ] : null),
             'pickers' => $pickers,
             'packers' => $packers,
             'customer' => [

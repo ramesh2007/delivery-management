@@ -1054,6 +1054,13 @@ class DeliveryManagementController extends Controller
             $orderId = $request->input('order_id') ?? ($rawJson['order_id'] ?? null);
             $assignmentId = $request->input('assignment_id') ?? ($rawJson['assignment_id'] ?? null);
             $statusInput = $request->input('status') ?? ($rawJson['status'] ?? null) ?? $request->input('driver_status') ?? ($rawJson['driver_status'] ?? null);
+            if (!empty($statusInput)) {
+                $normalizedStatus = strtolower(trim((string) $statusInput));
+                if (in_array($normalizedStatus, ['assigned', 'accepted', 'started', 'delivered', 'cancelled', 'refund', 'exchange', 'flagged'])) {
+                    $targetDriverStatus = $normalizedStatus;
+                }
+            }
+
             $notes = $request->input('notes') ?? ($rawJson['notes'] ?? null) ?? $statusInput;
 
             $assignment = null;
@@ -1067,14 +1074,64 @@ class DeliveryManagementController extends Controller
                 $assignment = OrderDriverAssigned::where('order_number', $orderNumber)
                     ->orWhere('order_number', $cleanOrderNum)
                     ->orWhere('order_number', '#' . $cleanOrderNum)
+                    ->orWhere('order_number', 'SO-' . $cleanOrderNum)
                     ->first();
             }
 
             if (!$assignment) {
-                return response()->json([
-                    'status' => 'error',
-                    'message' => 'Driver assignment record not found for the specified order.'
-                ], 404);
+                $numOrIdStr = trim((string) ($orderNumber ?: $orderId));
+                if (empty($numOrIdStr)) {
+                    return response()->json([
+                        'status' => 'error',
+                        'message' => 'The order_number or order_id parameter is required.'
+                    ], 422);
+                }
+
+                $cleanNum = ltrim($numOrIdStr, '#');
+                $order = Order::where('order_number', $numOrIdStr)
+                    ->orWhere('order_number', $cleanNum)
+                    ->orWhere('order_number', '#' . $cleanNum)
+                    ->orWhere('order_number', 'SO-' . $cleanNum)
+                    ->orWhere('id', $numOrIdStr)
+                    ->first();
+
+                if (!$order) {
+                    $order = Order::create([
+                        'order_number' => $numOrIdStr,
+                        'customer_name' => 'Guest Customer',
+                        'total_amount' => 0.00,
+                        'status' => $targetDriverStatus === 'delivered' ? 'delivered' : 'assigned_to_driver',
+                    ]);
+                }
+
+                $user = Auth::user();
+                $driverId = $request->input('assigned_driver_user_id')
+                    ?? ($rawJson['assigned_driver_user_id'] ?? null)
+                    ?? $request->input('driver_id')
+                    ?? ($rawJson['driver_id'] ?? null)
+                    ?? $request->input('driver_user_id')
+                    ?? ($rawJson['driver_user_id'] ?? null)
+                    ?? $request->input('user_id')
+                    ?? ($rawJson['user_id'] ?? null)
+                    ?? ($order->delivered_by ?: ($user ? $user->id : null));
+
+                $driver = $driverId ? User::find($driverId) : null;
+                if (!$driver) {
+                    $driver = User::where('role', 'driver')->orWhere('role', 'Driver')->first();
+                }
+
+                $driverId = $driver ? $driver->id : null;
+                $driverName = $driver ? $driver->name : ($order->delivered_user_name ?: 'Driver User');
+
+                $assignment = OrderDriverAssigned::create([
+                    'order_id' => $order->id,
+                    'order_number' => $order->order_number,
+                    'assigned_driver_user_id' => $driverId,
+                    'driver_name' => $driverName,
+                    'order_status' => $targetDriverStatus === 'delivered' ? 'delivered' : $order->status,
+                    'driver_status' => $targetDriverStatus,
+                    'assigned_at' => now(),
+                ]);
             }
 
             $oldDriverStatus = $assignment->driver_status;

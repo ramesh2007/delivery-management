@@ -40,8 +40,12 @@ Route::get('/orders/packing', [OrderStatusApiController::class, 'packing']);
 Route::get('/orders/status/in-delivery', [OrderStatusApiController::class, 'inDelivery']);
 Route::get('/orders/in-delivery', [OrderStatusApiController::class, 'inDelivery']);
 
-Route::get('/orders/status/delivered', [OrderStatusApiController::class, 'delivered']);
-Route::get('/orders/delivered', [OrderStatusApiController::class, 'delivered']);
+Route::match(['get', 'post'], '/orders/status/delivered', [OrderStatusApiController::class, 'delivered']);
+Route::match(['get', 'post'], '/orders/delivered', [OrderStatusApiController::class, 'delivered']);
+
+Route::get('/orders/installation', [OrderStatusApiController::class, 'installationOrders']);
+Route::get('/orders/cancelled-delivery', [OrderStatusApiController::class, 'cancelledDelivery']);
+Route::get('/orders/flagged', [OrderStatusApiController::class, 'flaggedOrders']);
 
 // Driver Management & Order Assignment Endpoints (React.js Frontend & Flutter App)
 Route::get('/get-drivers-list', [DeliveryManagementController::class, 'index']);
@@ -54,7 +58,13 @@ Route::get('/get-packers-list', [PackerManagementController::class, 'getPackersL
 // React.js API to assign driver to an order
 Route::post('/driver/assign', [DeliveryManagementController::class, 'assignDriver']);
 Route::post('/orders/assign-driver', [DeliveryManagementController::class, 'assignDriver']);
-Route::post('/resource/Sales Order/assign-driver', [DeliveryManagementController::class, 'assignDriver']);
+Route::post('/resource/sales-order/assign-driver', [DeliveryManagementController::class, 'assignDriver']);
+
+// Payment Status Update Endpoint
+Route::post('/orders/update-payment-status', [OrderManagementController::class, 'updatePaymentStatus']);
+
+// Create Return / Replacement Endpoint
+Route::post('/orders/return-replacement', [OrderManagementController::class, 'createReturnReplacement']);
 
 // Flutter App API to fetch assigned orders for a driver using driver user id
 Route::get('/driver/assigned-orders/{driver_user_id}', [DeliveryManagementController::class, 'getAssignedOrders']);

@@ -6,6 +6,7 @@ use App\Models\ShopifyStore;
 use App\Models\Order;
 use App\Models\OrderItem;
 use App\Models\OrderStatusLog;
+use App\Models\OrderPayment;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -214,6 +215,89 @@ public function exchangeCodeForToken(string $shop, string $code): array
     }
 
     /**
+     * Fetch single product details from Shopify API by Product ID
+     */
+    public function getProduct(string $productId, ?string $shop = null, ?string $accessToken = null): array
+    {
+        $store = $this->resolveCredentials($shop, $accessToken);
+        if (!$store['success']) {
+            return $store;
+        }
+
+        $shopDomain = $store['shop'];
+        $token = $store['access_token'];
+        $url = "https://{$shopDomain}/admin/api/{$this->apiVersion}/products/{$productId}.json";
+
+        try {
+            $response = Http::withHeaders([
+                'X-Shopify-Access-Token' => $token,
+                'Content-Type' => 'application/json',
+            ])->get($url);
+
+            if ($response->successful()) {
+                return [
+                    'success' => true,
+                    'shop' => $shopDomain,
+                    'product' => $response->json('product', []),
+                    'raw' => $response->json(),
+                ];
+            }
+
+            return [
+                'success' => false,
+                'shop' => $shopDomain,
+                'error' => $response->json('errors') ?? $response->body(),
+                'status_code' => $response->status(),
+            ];
+        } catch (\Exception $e) {
+            Log::error("Shopify API getProduct Exception: " . $e->getMessage());
+            return [
+                'success' => false,
+                'shop' => $shopDomain,
+                'error' => $e->getMessage(),
+            ];
+        }
+    }
+
+    /**
+     * Helper to extract product image URL from Shopify Product payload
+     */
+    public function extractProductImageUrl(array $product, ?string $variantId = null): ?string
+    {
+        // 1. Try to find variant-specific image if variant_id provided
+        if ($variantId && !empty($product['images']) && is_array($product['images'])) {
+            foreach ($product['images'] as $img) {
+                if (!empty($img['variant_ids']) && is_array($img['variant_ids']) && in_array((int)$variantId, $img['variant_ids'])) {
+                    if (!empty($img['src'])) {
+                        return $img['src'];
+                    }
+                }
+            }
+        }
+
+        // 2. Check main product image object
+        if (!empty($product['image'])) {
+            if (is_array($product['image']) && !empty($product['image']['src'])) {
+                return $product['image']['src'];
+            } elseif (is_string($product['image'])) {
+                return $product['image'];
+            }
+        }
+
+        // 3. Fallback to first image in images array
+        if (!empty($product['images']) && is_array($product['images']) && isset($product['images'][0])) {
+            $firstImg = $product['images'][0];
+            if (is_array($firstImg) && !empty($firstImg['src'])) {
+                return $firstImg['src'];
+            } elseif (is_string($firstImg)) {
+                return $firstImg;
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Fetch orders list from Shopify API
      */
     public function getOrders(?string $shop = null, ?string $accessToken = null, array $params = []): array
@@ -280,120 +364,12 @@ public function exchangeCodeForToken(string $shop, string $code): array
 
         $syncedOrdersCount = 0;
         $syncedItemsCount = 0;
+        $productImageMap = [];
 
         foreach ($ordersResult['orders'] as $shopifyOrder) {
-            // Store exact Shopify Order ID as order_number
-            $shopifyOrderId = (string) ($shopifyOrder['id'] ?? $shopifyOrder['order_number'] ?? $shopifyOrder['name']);
-            $orderNumber = $shopifyOrderId;
-            
-            $customerName = null;
-            if (!empty($shopifyOrder['customer'])) {
-                $customerName = trim(($shopifyOrder['customer']['first_name'] ?? '') . ' ' . ($shopifyOrder['customer']['last_name'] ?? ''));
-            }
-            $customerPhone = $shopifyOrder['phone'] ?? $shopifyOrder['customer']['phone'] ?? $shopifyOrder['shipping_address']['phone'] ?? null;
-            
-            $shippingAddress = null;
-            if (!empty($shopifyOrder['shipping_address'])) {
-                $addr = $shopifyOrder['shipping_address'];
-                $shippingAddress = implode(', ', array_filter([
-                    $addr['address1'] ?? null,
-                    $addr['address2'] ?? null,
-                    $addr['city'] ?? null,
-                    $addr['province'] ?? null,
-                    $addr['zip'] ?? null,
-                    $addr['country'] ?? null,
-                ]));
-            }
-
-            // Find existing order by Shopify Order ID or order_number
-            $order = Order::where('order_number', $shopifyOrderId)
-                ->orWhere('order_number', (string) ($shopifyOrder['name'] ?? ''))
-                ->orWhere('order_number', (string) ($shopifyOrder['order_number'] ?? ''))
-                ->first();
-
-            if (!$order) {
-                $order = Order::create([
-                    'order_number' => $shopifyOrderId,
-                    'customer_name' => $customerName,
-                    'customer_phone' => $customerPhone,
-                    'delivery_address' => $shippingAddress,
-                    'total_amount' => $shopifyOrder['total_price'] ?? 0.00,
-                    'status' => 'pending', // Default status for new orders
-                ]);
-
-                OrderStatusLog::create([
-                    'order_id' => $order->id,
-                    'action' => 'shopify_synced',
-                    'new_status' => 'pending',
-                    'notes' => "Synced from Shopify API as New Order (Shopify Order ID: {$shopifyOrderId})",
-                ]);
-            } else {
-                // Update customer & amount details, update order_number to Shopify Order ID, but KEEP existing status intact
-                $order->update([
-                    'order_number' => $shopifyOrderId,
-                    'customer_name' => $customerName ?: $order->customer_name,
-                    'customer_phone' => $customerPhone ?: $order->customer_phone,
-                    'delivery_address' => $shippingAddress ?: $order->delivery_address,
-                    'total_amount' => $shopifyOrder['total_price'] ?? $order->total_amount,
-                ]);
-            }
-
+            $order = $this->processSingleOrderPayload($shopifyOrder, $shop, $accessToken, $productImageMap);
             $syncedOrdersCount++;
-
-            if (!empty($shopifyOrder['line_items'])) {
-                foreach ($shopifyOrder['line_items'] as $item) {
-                    $lineItemId = (string) ($item['id'] ?? '');
-                    $productCode = $item['sku'] ?: ('SKU-' . ($item['product_id'] ?? $item['id']));
-                    $barcode = $item['barcode'] ?? $item['sku'] ?? $productCode;
-
-                    $orderItem = OrderItem::where('order_id', $order->id)
-                        ->where(function ($q) use ($lineItemId, $productCode) {
-                            if (!empty($lineItemId)) {
-                                $q->where('line_item_id', $lineItemId)->orWhere('product_code', $productCode);
-                            } else {
-                                $q->where('product_code', $productCode);
-                            }
-                        })
-                        ->first();
-
-                    $itemImage = null;
-                    if (!empty($item['image'])) {
-                        $itemImage = is_array($item['image']) ? ($item['image']['src'] ?? null) : $item['image'];
-                    } elseif (!empty($item['image_url'])) {
-                        $itemImage = $item['image_url'];
-                    } elseif (!empty($item['featured_image']) && is_array($item['featured_image'])) {
-                        $itemImage = $item['featured_image']['src'] ?? null;
-                    }
-
-                    if (!$orderItem) {
-                        OrderItem::create([
-                            'order_id' => $order->id,
-                            'line_item_id' => $lineItemId,
-                            'product_id' => (string) ($item['product_id'] ?? ''),
-                            'product_code' => $productCode,
-                            'barcode' => $barcode,
-                            'product_name' => $item['title'] ?? $item['name'] ?? 'Product',
-                            'image' => $itemImage,
-                            'quantity' => $item['quantity'] ?? 1,
-                            'unit_price' => $item['price'] ?? 0.00,
-                            'status' => 'pending', // Default status for new item
-                        ]);
-                    } else {
-                        // Update details including line_item_id without resetting status or timestamps
-                        $orderItem->update([
-                            'line_item_id' => $lineItemId ?: $orderItem->line_item_id,
-                            'product_id' => (string) ($item['product_id'] ?? $orderItem->product_id),
-                            'barcode' => $barcode ?: $orderItem->barcode,
-                            'product_name' => $item['title'] ?? $item['name'] ?? $orderItem->product_name,
-                            'image' => $itemImage ?: $orderItem->image,
-                            'quantity' => $item['quantity'] ?? $orderItem->quantity,
-                            'unit_price' => $item['price'] ?? $orderItem->unit_price,
-                        ]);
-                    }
-
-                    $syncedItemsCount++;
-                }
-            }
+            $syncedItemsCount += $order->items->count();
         }
 
         return [
@@ -402,6 +378,203 @@ public function exchangeCodeForToken(string $shop, string $code): array
             'orders_count' => $syncedOrdersCount,
             'items_count' => $syncedItemsCount,
         ];
+    }
+
+    /**
+     * Process and save a single Shopify order payload (e.g. from Webhook or Real-time Placement) into database
+     */
+    public function processSingleOrderPayload(array $shopifyOrder, ?string $shop = null, ?string $accessToken = null, array &$productImageMap = []): Order
+    {
+        $rawId = isset($shopifyOrder['id']) ? (string) $shopifyOrder['id'] : null;
+        $rawOrderNum = isset($shopifyOrder['order_number']) ? (string) $shopifyOrder['order_number'] : null;
+        $rawName = isset($shopifyOrder['name']) ? (string) $shopifyOrder['name'] : null;
+
+        $shopifyOrderId = $rawId ?: ($rawOrderNum ?: ($rawName ?: ('ORD-' . time())));
+
+        // Gather all candidate identifiers to find existing order without creating duplicates
+        $candidateNumbers = array_values(array_unique(array_filter([
+            $rawId,
+            $rawOrderNum,
+            $rawName,
+            $rawOrderNum ? '#' . ltrim($rawOrderNum, '#') : null,
+            $rawOrderNum ? ltrim($rawOrderNum, '#') : null,
+            $rawName ? '#' . ltrim($rawName, '#') : null,
+            $rawName ? ltrim($rawName, '#') : null,
+        ])));
+
+        $customerName = null;
+        if (!empty($shopifyOrder['customer'])) {
+            $customerName = trim(($shopifyOrder['customer']['first_name'] ?? '') . ' ' . ($shopifyOrder['customer']['last_name'] ?? ''));
+        }
+        $customerPhone = $shopifyOrder['phone'] ?? $shopifyOrder['customer']['phone'] ?? $shopifyOrder['shipping_address']['phone'] ?? null;
+
+        $shippingAddress = null;
+        if (!empty($shopifyOrder['shipping_address'])) {
+            $addr = $shopifyOrder['shipping_address'];
+            $shippingAddress = implode(', ', array_filter([
+                $addr['address1'] ?? null,
+                $addr['address2'] ?? null,
+                $addr['city'] ?? null,
+                $addr['province'] ?? null,
+                $addr['zip'] ?? null,
+                $addr['country'] ?? null,
+            ]));
+        }
+
+        // Query existing orders matching any candidate order identifier
+        $existingOrders = Order::whereIn('order_number', $candidateNumbers)->get();
+
+        if ($existingOrders->count() > 1) {
+            // Keep first order, merge duplicate orders if any exist in database
+            $order = $existingOrders->first();
+            foreach ($existingOrders->slice(1) as $dupOrder) {
+                OrderItem::where('order_id', $dupOrder->id)->update(['order_id' => $order->id]);
+                OrderStatusLog::where('order_id', $dupOrder->id)->update(['order_id' => $order->id]);
+                $dupOrder->delete();
+            }
+        } else {
+            $order = $existingOrders->first();
+        }
+
+        if (!$order) {
+            $order = Order::create([
+                'order_number' => $shopifyOrderId,
+                'customer_name' => $customerName,
+                'customer_phone' => $customerPhone,
+                'delivery_address' => $shippingAddress,
+                'total_amount' => $shopifyOrder['total_price'] ?? 0.00,
+                'status' => 'pending',
+            ]);
+
+            OrderStatusLog::create([
+                'order_id' => $order->id,
+                'action' => 'shopify_synced',
+                'new_status' => 'pending',
+                'notes' => "Synced from Shopify Webhook/Payload as New Order (Order Number: {$shopifyOrderId})",
+            ]);
+        } else {
+            $order->update([
+                'customer_name' => $customerName ?: $order->customer_name,
+                'customer_phone' => $customerPhone ?: $order->customer_phone,
+                'delivery_address' => $shippingAddress ?: $order->delivery_address,
+                'total_amount' => $shopifyOrder['total_price'] ?? $order->total_amount,
+            ]);
+        }
+
+        // Sync payment details into order_payments table
+        $this->syncOrderPayment($order, $shopifyOrder);
+
+        if (!empty($shopifyOrder['line_items'])) {
+            foreach ($shopifyOrder['line_items'] as $item) {
+                $lineItemId = !empty($item['id']) ? (string) $item['id'] : null;
+                $sku = !empty($item['sku']) ? trim((string) $item['sku']) : null;
+                $productIdStr = !empty($item['product_id']) ? (string) $item['product_id'] : null;
+
+                // Deterministic product code, avoiding rand() duplicates
+                if (!empty($sku)) {
+                    $productCode = $sku;
+                } elseif (!empty($productIdStr)) {
+                    $productCode = 'PROD-' . $productIdStr;
+                } elseif (!empty($lineItemId)) {
+                    $productCode = 'LINE-' . $lineItemId;
+                } else {
+                    $productCode = 'ITEM-' . md5(($item['title'] ?? $item['name'] ?? 'product') . ($item['price'] ?? 0));
+                }
+
+                $barcode = !empty($item['barcode']) ? $item['barcode'] : ($sku ?: $productCode);
+
+                // 1. Precise lookup by line_item_id first to prevent cross-item contamination or duplication
+                $orderItem = null;
+                if (!empty($lineItemId)) {
+                    $existingItems = OrderItem::where('order_id', $order->id)
+                        ->where('line_item_id', $lineItemId)
+                        ->get();
+
+                    if ($existingItems->count() > 1) {
+                        $orderItem = $existingItems->first();
+                        // Clean up existing duplicates from previous buggy syncs
+                        foreach ($existingItems->slice(1) as $dup) {
+                            $dup->delete();
+                        }
+                    } else {
+                        $orderItem = $existingItems->first();
+                    }
+                }
+
+                // 2. Fallback to product_code for items where line_item_id is NULL
+                if (!$orderItem) {
+                    $existingItems = OrderItem::where('order_id', $order->id)
+                        ->whereNull('line_item_id')
+                        ->where('product_code', $productCode)
+                        ->get();
+
+                    if ($existingItems->count() > 0) {
+                        $orderItem = $existingItems->first();
+                        if ($existingItems->count() > 1) {
+                            foreach ($existingItems->slice(1) as $dup) {
+                                $dup->delete();
+                            }
+                        }
+                    }
+                }
+
+                $itemImage = null;
+                if (!empty($item['image'])) {
+                    $itemImage = is_array($item['image']) ? ($item['image']['src'] ?? null) : $item['image'];
+                } elseif (!empty($item['image_url'])) {
+                    $itemImage = $item['image_url'];
+                } elseif (!empty($item['featured_image'])) {
+                    $itemImage = is_array($item['featured_image']) ? ($item['featured_image']['src'] ?? null) : $item['featured_image'];
+                }
+
+                if (empty($itemImage) && $orderItem && !empty($orderItem->image)) {
+                    $itemImage = $orderItem->image;
+                }
+
+                if (empty($itemImage) && !empty($productIdStr)) {
+                    $variantId = !empty($item['variant_id']) ? (string) $item['variant_id'] : null;
+
+                    if (array_key_exists($productIdStr, $productImageMap)) {
+                        $itemImage = $productImageMap[$productIdStr];
+                    } else {
+                        $productResult = $this->getProduct($productIdStr, $shop, $accessToken);
+                        if ($productResult['success'] && !empty($productResult['product'])) {
+                            $itemImage = $this->extractProductImageUrl($productResult['product'], $variantId);
+                            $productImageMap[$productIdStr] = $itemImage;
+                        } else {
+                            $productImageMap[$productIdStr] = null;
+                        }
+                    }
+                }
+
+                if (!$orderItem) {
+                    $orderItem = OrderItem::create([
+                        'order_id' => $order->id,
+                        'line_item_id' => $lineItemId,
+                        'product_id' => $productIdStr ?: '',
+                        'product_code' => $productCode,
+                        'barcode' => $barcode,
+                        'product_name' => $item['title'] ?? $item['name'] ?? 'Product',
+                        'image' => $itemImage,
+                        'quantity' => $item['quantity'] ?? 1,
+                        'unit_price' => $item['price'] ?? 0.00,
+                        'status' => 'pending',
+                    ]);
+                } else {
+                    $orderItem->update([
+                        'line_item_id' => $lineItemId ?: $orderItem->line_item_id,
+                        'product_id' => $productIdStr ?: $orderItem->product_id,
+                        'barcode' => $barcode ?: $orderItem->barcode,
+                        'product_name' => $item['title'] ?? $item['name'] ?? $orderItem->product_name,
+                        'image' => $itemImage ?: $orderItem->image,
+                        'quantity' => $item['quantity'] ?? $orderItem->quantity,
+                        'unit_price' => $item['price'] ?? $orderItem->unit_price,
+                    ]);
+                }
+            }
+        }
+
+        return $order->fresh(['items', 'payment']);
     }
 
     /**
@@ -445,4 +618,71 @@ public function exchangeCodeForToken(string $shop, string $code): array
             'error' => 'No active Shopify store connected. Please connect a shop via OAuth or set SHOPIFY_SHOP_DOMAIN and SHOPIFY_ACCESS_TOKEN in .env.',
         ];
     }
+
+    /**
+     * Parse and sync payment details from Shopify order payload into order_payments table and order model.
+     */
+    public function syncOrderPayment(Order $order, array $shopifyOrder): OrderPayment
+    {
+        $paymentMethod = null;
+        if (!empty($shopifyOrder['payment_gateway_names'])) {
+            if (is_array($shopifyOrder['payment_gateway_names'])) {
+                $paymentMethod = implode(', ', array_filter($shopifyOrder['payment_gateway_names']));
+            } else {
+                $paymentMethod = (string) $shopifyOrder['payment_gateway_names'];
+            }
+        } elseif (!empty($shopifyOrder['gateway'])) {
+            $paymentMethod = (string) $shopifyOrder['gateway'];
+        }
+
+        $financialStatus = $shopifyOrder['financial_status'] ?? null;
+        $totalPrice = (float) ($shopifyOrder['total_price'] ?? $shopifyOrder['current_total_price'] ?? 0.00);
+        $totalOutstanding = (float) ($shopifyOrder['total_outstanding'] ?? 0.00);
+
+        if (strtolower((string) $financialStatus) === 'paid') {
+            $paidAmount = max($totalPrice - $totalOutstanding, $totalPrice);
+        } else {
+            $paidAmount = max(0.00, $totalPrice - $totalOutstanding);
+        }
+
+        $currency = $shopifyOrder['currency'] ?? $shopifyOrder['presentment_currency'] ?? 'QAR';
+        $shopifyOrderId = (string) ($shopifyOrder['id'] ?? $shopifyOrder['admin_graphql_api_id'] ?? '');
+
+        $processedAt = !empty($shopifyOrder['processed_at']) ? date('Y-m-d H:i:s', strtotime($shopifyOrder['processed_at'])) : null;
+        $createdAt = !empty($shopifyOrder['created_at']) ? date('Y-m-d H:i:s', strtotime($shopifyOrder['created_at'])) : null;
+        $updatedAt = !empty($shopifyOrder['updated_at']) ? date('Y-m-d H:i:s', strtotime($shopifyOrder['updated_at'])) : null;
+
+        $orderPayment = OrderPayment::updateOrCreate(
+            ['order_id' => $order->id],
+            [
+                'shopify_order_id' => $shopifyOrderId,
+                'payment_method' => $paymentMethod,
+                'payment_status' => $financialStatus,
+                'paid_amount' => $paidAmount,
+                'total_price' => $totalPrice,
+                'total_outstanding' => $totalOutstanding,
+                'currency' => $currency,
+                'processed_at' => $processedAt,
+                'shopify_created_at' => $createdAt,
+                'shopify_updated_at' => $updatedAt,
+                'raw_payment_details' => [
+                    'payment_gateway_names' => $shopifyOrder['payment_gateway_names'] ?? [],
+                    'financial_status' => $financialStatus,
+                    'total_price' => $totalPrice,
+                    'total_outstanding' => $totalOutstanding,
+                    'currency' => $currency,
+                ],
+            ]
+        );
+
+        // Also update parent Order model's payment columns for compatibility
+        $order->update([
+            'payment_method' => $paymentMethod ?: $order->payment_method,
+            'payment_status' => $financialStatus ?: $order->payment_status,
+            'collected_amount' => $paidAmount,
+        ]);
+
+        return $orderPayment;
+    }
 }
+

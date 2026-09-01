@@ -39,7 +39,8 @@ class ResourceController extends Controller
                 'items.packedUser',
                 'items.deliveredUser',
                 'assignedUser',
-                'deliveredUser'
+                'deliveredUser',
+                'payment',
             ])->whereIn('order_number', $candidateKeys)->get();
 
             $localOrderMap = [];
@@ -219,6 +220,27 @@ class ResourceController extends Controller
         $lat = (float)($shippingAddress['latitude'] ?? 25.276987);
         $lng = (float)($shippingAddress['longitude'] ?? 51.520008);
 
+        $paymentMethod = null;
+        if (!empty($order['payment_gateway_names'])) {
+            if (is_array($order['payment_gateway_names'])) {
+                $paymentMethod = implode(', ', array_filter($order['payment_gateway_names']));
+            } else {
+                $paymentMethod = (string) $order['payment_gateway_names'];
+            }
+        } elseif (!empty($order['gateway'])) {
+            $paymentMethod = (string) $order['gateway'];
+        }
+        if (!$paymentMethod) {
+            $paymentMethod = 'Cash on Delivery (COD)';
+        }
+
+        $financialStatus = $order['financial_status'] ?? 'pending';
+        $paymentStatusStr = ucfirst(str_replace('_', ' ', (string) $financialStatus));
+        $totalPrice = (float) ($order['total_price'] ?? 0.00);
+        $totalOutstanding = (float) ($order['total_outstanding'] ?? 0.00);
+        $paidAmount = max(0.00, $totalPrice - $totalOutstanding);
+        $currency = $order['currency'] ?? 'QAR';
+
         $placeholders = [
             'https://images.unsplash.com/photo-1519689680058-324335c77eba?w=150',
             'https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=150',
@@ -261,16 +283,35 @@ class ResourceController extends Controller
             ];
         }, $lineItems, array_keys($lineItems));
 
+        $orderName = $order['name'] ?? ('SO-' . ($order['order_number'] ?? $order['id']));
         $orderData = [
-            'name' => $order['name'] ?? ('SO-' . ($order['order_number'] ?? $order['id'])),
+            'order_number' => $orderName,
+            'name' => $orderName,
             'customer' => 'CUST-' . ($order['customer']['id'] ?? $order['id']),
             'customer_name' => $customerName,
             'contact_email' => $email,
             'contact_phone' => $phone,
             'transaction_date' => $transactionDate,
             'delivery_date' => $deliveryDate,
-            'grand_total' => (float)($order['total_price'] ?? 0),
+            'grand_total' => $totalPrice,
             'status' => $status,
+            'payment_method' => $paymentMethod,
+            'payment_status' => $financialStatus,
+            'custom_payment_method' => $paymentMethod,
+            'custom_payment_status' => $paymentStatusStr,
+            'financial_status' => $financialStatus,
+            'paid_amount' => $paidAmount,
+            'total_outstanding' => $totalOutstanding,
+            'currency' => $currency,
+            'payment' => [
+                'payment_method' => $paymentMethod,
+                'payment_status' => $financialStatus,
+                'paid_amount' => $paidAmount,
+                'total_price' => $totalPrice,
+                'total_outstanding' => $totalOutstanding,
+                'currency' => $currency,
+                'processed_at' => $order['processed_at'] ?? null,
+            ],
             'custom_city' => $city ?: 'Doha',
             'custom_zone' => $zone ?: 'Zone A',
             'custom_coordinator' => 'Unassigned',
@@ -606,6 +647,7 @@ class ResourceController extends Controller
             : '#' . $orderId;
 
         $genericData = [
+            'order_number' => $formattedName,
             'name' => $formattedName,
             'customer' => 'CUST-' . abs(crc32($orderId)),
             'customer_name' => 'Customer (' . $formattedName . ')',
@@ -615,6 +657,23 @@ class ResourceController extends Controller
             'delivery_date' => date('Y-m-d', strtotime('+1 day')),
             'grand_total' => 250.00,
             'status' => 'Pending',
+            'payment_method' => 'Cash on Delivery (COD)',
+            'payment_status' => 'pending',
+            'custom_payment_method' => 'Cash on Delivery (COD)',
+            'custom_payment_status' => 'Pending',
+            'financial_status' => 'pending',
+            'paid_amount' => 0.00,
+            'total_outstanding' => 250.00,
+            'currency' => 'QAR',
+            'payment' => [
+                'payment_method' => 'Cash on Delivery (COD)',
+                'payment_status' => 'pending',
+                'paid_amount' => 0.00,
+                'total_price' => 250.00,
+                'total_outstanding' => 250.00,
+                'currency' => 'QAR',
+                'processed_at' => null,
+            ],
             'custom_city' => 'Doha',
             'custom_zone' => 'Zone A',
             'custom_coordinator' => 'Unassigned',
@@ -732,7 +791,8 @@ class ResourceController extends Controller
             'items.packedUser',
             'items.deliveredUser',
             'assignedUser',
-            'deliveredUser'
+            'deliveredUser',
+            'payment',
         ])->where(function ($q) use ($keys) {
             $q->whereIn('order_number', $keys);
             foreach ($keys as $k) {
@@ -757,6 +817,70 @@ class ResourceController extends Controller
         ];
         $orderData['status'] = $statusMap[$dbStatusRaw] ?? ucfirst(str_replace('_', ' ', $dbStatusRaw));
 
+        if (!empty($dbOrder->order_number)) {
+            $orderData['order_number'] = $dbOrder->order_number;
+            $orderData['name'] = $dbOrder->order_number;
+        }
+
+        if (!empty($dbOrder->customer_name)) {
+            $orderData['customer_name'] = $dbOrder->customer_name;
+        }
+        if (!empty($dbOrder->customer_phone)) {
+            $orderData['contact_phone'] = $dbOrder->customer_phone;
+        }
+        if (!empty($dbOrder->delivery_address)) {
+            $orderData['custom_shipping_address_line1'] = $dbOrder->delivery_address;
+        }
+        if (isset($dbOrder->total_amount) && (float)$dbOrder->total_amount > 0) {
+            $orderData['grand_total'] = (float)$dbOrder->total_amount;
+        }
+        if (isset($dbOrder->bag_count) && (int)$dbOrder->bag_count > 0) {
+            $orderData['custom_bags'] = (int)$dbOrder->bag_count;
+        }
+
+        $dbOrder->loadMissing('payment');
+        if ($dbOrder->payment) {
+            $paymentMethod = $dbOrder->payment->payment_method ?: ($orderData['payment_method'] ?? 'Cash on Delivery (COD)');
+            $financialStatus = $dbOrder->payment->payment_status ?: ($orderData['payment_status'] ?? 'pending');
+            $paidAmount = (float) $dbOrder->payment->paid_amount;
+            $totalPrice = (float) $dbOrder->payment->total_price ?: (float) ($orderData['grand_total'] ?? 0);
+            $totalOutstanding = (float) $dbOrder->payment->total_outstanding;
+            $currency = $dbOrder->payment->currency ?: ($orderData['currency'] ?? 'QAR');
+
+            $orderData['payment_method'] = $paymentMethod;
+            $orderData['payment_status'] = $financialStatus;
+            $orderData['custom_payment_method'] = $paymentMethod;
+            $orderData['custom_payment_status'] = ucfirst(str_replace('_', ' ', (string) $financialStatus));
+            $orderData['financial_status'] = $financialStatus;
+            $orderData['paid_amount'] = $paidAmount;
+            $orderData['total_outstanding'] = $totalOutstanding;
+            $orderData['currency'] = $currency;
+            $orderData['payment'] = [
+                'id' => $dbOrder->payment->id,
+                'shopify_order_id' => $dbOrder->payment->shopify_order_id,
+                'payment_method' => $paymentMethod,
+                'payment_status' => $financialStatus,
+                'paid_amount' => $paidAmount,
+                'total_price' => $totalPrice,
+                'total_outstanding' => $totalOutstanding,
+                'currency' => $currency,
+                'processed_at' => $dbOrder->payment->processed_at ? $dbOrder->payment->processed_at->toIso8601String() : null,
+                'shopify_created_at' => $dbOrder->payment->shopify_created_at ? $dbOrder->payment->shopify_created_at->toIso8601String() : null,
+                'shopify_updated_at' => $dbOrder->payment->shopify_updated_at ? $dbOrder->payment->shopify_updated_at->toIso8601String() : null,
+            ];
+        } elseif (!empty($dbOrder->payment_method) || !empty($dbOrder->payment_status)) {
+            $paymentMethod = $dbOrder->payment_method ?: ($orderData['payment_method'] ?? 'Cash on Delivery (COD)');
+            $financialStatus = $dbOrder->payment_status ?: ($orderData['payment_status'] ?? 'pending');
+            $orderData['payment_method'] = $paymentMethod;
+            $orderData['payment_status'] = $financialStatus;
+            $orderData['custom_payment_method'] = $paymentMethod;
+            $orderData['custom_payment_status'] = ucfirst(str_replace('_', ' ', (string) $financialStatus));
+            $orderData['financial_status'] = $financialStatus;
+            if (isset($dbOrder->collected_amount)) {
+                $orderData['paid_amount'] = (float) $dbOrder->collected_amount;
+            }
+        }
+
         $dbItems = $dbOrder->items;
         $totalItemsCount = max(count($orderData['line_items'] ?? []), $dbItems->count(), 1);
 
@@ -771,25 +895,40 @@ class ResourceController extends Controller
         $orderData['custom_picking_status'] = "{$pickedCount}/{$totalItemsCount} Picked";
         $orderData['custom_packing_status'] = "{$packedCount}/{$totalItemsCount} Packed";
 
-        // Picker name
+        // Picker details
         $pickerName = $dbOrder->assigned_user_name ?: ($dbOrder->assignedUser->name ?? null);
         if (!$pickerName) {
             $pickers = $dbItems->map(fn($i) => $i->picked_user_name ?: ($i->pickedUser->name ?? ($i->assigned_user_name ?: null)))->filter()->unique()->values();
             $pickerName = $pickers->isNotEmpty() ? implode(', ', $pickers->all()) : 'Unassigned';
         }
         $orderData['custom_picker'] = $pickerName;
+        $orderData['assigned_to'] = $dbOrder->assigned_to ? (int) $dbOrder->assigned_to : null;
+        $orderData['assigned_user_name'] = $dbOrder->assigned_user_name ?: ($dbOrder->assignedUser->name ?? null);
 
-        // Packer name
+        $pickedByUserId = $dbItems->whereNotNull('picked_by')->pluck('picked_by')->first() ?: $dbOrder->assigned_to;
+        $orderData['picked_by'] = $pickedByUserId ? (int) $pickedByUserId : null;
+        $orderData['picked_user_name'] = $pickerName !== 'Unassigned' ? $pickerName : null;
+
+        // Packer details
         $packers = $dbItems->map(fn($i) => $i->packed_user_name ?: ($i->packedUser->name ?? null))->filter()->unique()->values();
-        $orderData['custom_packer'] = $packers->isNotEmpty() ? implode(', ', $packers->all()) : 'Unassigned';
+        $packerName = $packers->isNotEmpty() ? implode(', ', $packers->all()) : 'Unassigned';
+        $orderData['custom_packer'] = $packerName;
 
-        // Driver name & status
+        $packedByUserId = $dbItems->whereNotNull('packed_by')->pluck('packed_by')->first() ?: $dbItems->whereNotNull('packer_verified_by')->pluck('packer_verified_by')->first();
+        $orderData['packed_by'] = $packedByUserId ? (int) $packedByUserId : null;
+        $orderData['packed_user_name'] = $packerName !== 'Unassigned' ? $packerName : null;
+
+        // Driver / Delivery details
         $driverName = $dbOrder->delivered_user_name ?: ($dbOrder->deliveredUser->name ?? null);
         if (!$driverName) {
             $drivers = $dbItems->map(fn($i) => $i->delivered_user_name ?: ($i->deliveredUser->name ?? null))->filter()->unique()->values();
             $driverName = $drivers->isNotEmpty() ? implode(', ', $drivers->all()) : 'Unassigned';
         }
         $orderData['custom_driver'] = $driverName;
+
+        $deliveredByUserId = $dbOrder->delivered_by ?: $dbItems->whereNotNull('delivered_by')->pluck('delivered_by')->first();
+        $orderData['delivered_by'] = $deliveredByUserId ? (int) $deliveredByUserId : null;
+        $orderData['delivered_user_name'] = $driverName !== 'Unassigned' ? $driverName : null;
 
         if ($dbStatusRaw === 'delivered') {
             $orderData['custom_driver_status'] = 'Delivered';
@@ -828,14 +967,54 @@ class ResourceController extends Controller
                     $item['custom_status'] = ucfirst(strtolower($dbItem->status));
                     if (!empty($dbItem->barcode)) {
                         $item['custom_barcode'] = $dbItem->barcode;
+                        $item['barcode'] = $dbItem->barcode;
                     }
                     if (!empty($dbItem->product_code)) {
                         $item['sku'] = $dbItem->product_code;
+                        $item['product_code'] = $dbItem->product_code;
+                    }
+                    if (!empty($dbItem->product_name)) {
+                        $item['name'] = $dbItem->product_name;
+                        $item['title'] = $dbItem->product_name;
+                    }
+                    if (!empty($dbItem->image)) {
+                        $item['image'] = $dbItem->image;
+                        $item['image_url'] = $dbItem->image;
+                        $item['product_image'] = $dbItem->image;
+                        $item['product_image_url'] = $dbItem->image;
+                    }
+                    if (!empty($dbItem->quantity)) {
+                        $item['quantity'] = (int)$dbItem->quantity;
+                    }
+                    if (isset($dbItem->unit_price) && (float)$dbItem->unit_price > 0) {
+                        $item['price'] = (float)$dbItem->unit_price;
+                        $item['amount'] = $item['quantity'] * $item['price'];
                     }
                     $item['db_item_id'] = $dbItem->id;
-                    $item['picked_by'] = $dbItem->picked_user_name ?: ($dbItem->pickedUser->name ?? null);
-                    $item['packed_by'] = $dbItem->packed_user_name ?: ($dbItem->packedUser->name ?? null);
-                    $item['delivered_by'] = $dbItem->delivered_user_name ?: ($dbItem->deliveredUser->name ?? null);
+                    $item['line_item_id'] = $dbItem->line_item_id ?: ($item['line_item_id'] ?? null);
+
+                    // Picker user details
+                    $item['assigned_to'] = $dbItem->assigned_to ? (int) $dbItem->assigned_to : null;
+                    $item['assigned_user_name'] = $dbItem->assigned_user_name ?: ($dbItem->assignedUser->name ?? null);
+                    $item['picked_by'] = $dbItem->picked_by ? (int) $dbItem->picked_by : ($dbItem->picked_user_name ?: null);
+                    $item['picked_user_name'] = $dbItem->picked_user_name ?: ($dbItem->pickedUser->name ?? null);
+
+                    // Packer user details
+                    $item['packed_by'] = $dbItem->packed_by ? (int) $dbItem->packed_by : ($dbItem->packer_verified_by ? (int) $dbItem->packer_verified_by : ($dbItem->packed_user_name ?: null));
+                    $item['packed_user_name'] = $dbItem->packed_user_name ?: ($dbItem->packedUser->name ?? ($dbItem->packer_verified_user_name ?? null));
+
+                    // Driver / Delivery user details
+                    $item['delivered_by'] = $dbItem->delivered_by ? (int) $dbItem->delivered_by : ($dbItem->delivered_user_name ?: null);
+                    $item['delivered_user_name'] = $dbItem->delivered_user_name ?: ($dbItem->deliveredUser->name ?? null);
+                } else {
+                    $item['assigned_to'] = $item['assigned_to'] ?? null;
+                    $item['assigned_user_name'] = $item['assigned_user_name'] ?? null;
+                    $item['picked_by'] = $item['picked_by'] ?? null;
+                    $item['picked_user_name'] = $item['picked_user_name'] ?? null;
+                    $item['packed_by'] = $item['packed_by'] ?? null;
+                    $item['packed_user_name'] = $item['packed_user_name'] ?? null;
+                    $item['delivered_by'] = $item['delivered_by'] ?? null;
+                    $item['delivered_user_name'] = $item['delivered_user_name'] ?? null;
                 }
 
                 return $item;

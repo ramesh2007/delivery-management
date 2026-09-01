@@ -164,7 +164,7 @@ class ShopifyController extends Controller
         $activeStore = $this->shopifyService->getActiveStore();
         
         return response()->json([
-            'connected' => (bool) ($activeStore && $activeStore->access_token),
+            'connected' => (bool) ($activeStore && $access_token = $activeStore->access_token),
             'shop' => $activeStore ? $activeStore->shop : null,
             'scopes' => $activeStore ? $activeStore->scopes : config('services.shopify.scopes'),
             'last_synced_at' => $activeStore ? $activeStore->last_synced_at : null,
@@ -173,5 +173,39 @@ class ShopifyController extends Controller
                 'redirect_uri' => config('services.shopify.redirect_uri'),
             ]
         ]);
+    }
+
+    /**
+     * Webhook Handler for Shopify real-time order creation / updates
+     */
+    public function handleOrderWebhook(Request $request)
+    {
+        $payload = $request->all();
+
+        if (empty($payload) || (empty($payload['id']) && empty($payload['order_number']) && empty($payload['name']))) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid or empty Shopify order webhook payload',
+            ], 400);
+        }
+
+        try {
+            // Process the order payload directly into local database
+            $order = $this->shopifyService->processSingleOrderPayload($payload);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Order webhook processed successfully',
+                'order_id' => $order->id,
+                'order_number' => $order->order_number,
+                'items_count' => $order->items->count(),
+            ], 200);
+        } catch (\Throwable $e) {
+            \Log::error("Shopify Order Webhook Exception: " . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'error' => $e->getMessage(),
+            ], 500);
+        }
     }
 }

@@ -142,21 +142,13 @@ class AuthService
             $resApiSecret = Schema::hasColumn('users', 'erpnext_api_secret') ? $user->erpnext_api_secret : $finalApiSecret;
             $resToken = Schema::hasColumn('users', 'erpnext_token') ? $user->erpnext_token : $finalToken;
 
+            if ($resToken) {
+                $user->erpnext_token = $resToken;
+            }
+
             return [
                 'token' => $token,
-                'api_key' => $resApiKey,
-                'api_secret' => $resApiSecret,
-                'erpnext_api_key' => $resApiKey,
-                'erpnext_api_secret' => $resApiSecret,
-                'erpnext_token' => $resToken,
-                'user_creds' => [
-                    'api_key' => $resApiKey,
-                    'api_secret' => $resApiSecret,
-                    'token' => $resToken,
-                ],
-                'user' => $user,
-                'roles' => $assignedRoles,
-                'role' => $primaryRole,
+                'user' => $this->formatUserResponse($user, $assignedRoles),
             ];
         } catch (Exception $e) {
             Log::info('ERPNext auth failed, checking local database fallback for: ' . $identifier);
@@ -201,28 +193,41 @@ class AuthService
                 if (empty($roles) && !empty($user->role)) {
                     $roles = [$user->role];
                 }
-                $primaryRole = $roles[0] ?? $user->role ?? null;
 
                 return [
                     'token' => $token,
-                    'api_key' => $userApiKey,
-                    'api_secret' => $userApiSecret,
-                    'erpnext_api_key' => $userApiKey,
-                    'erpnext_api_secret' => $userApiSecret,
-                    'erpnext_token' => $user->erpnext_token,
-                    'user_creds' => [
-                        'api_key' => $userApiKey,
-                        'api_secret' => $userApiSecret,
-                        'token' => $user->erpnext_token,
-                    ],
-                    'user' => $user,
-                    'roles' => $roles,
-                    'role' => $primaryRole,
+                    'user' => $this->formatUserResponse($user, $roles),
                 ];
             }
 
             throw new Exception($e->getMessage() ?: 'Invalid ERPNext credentials');
         }
+    }
+
+    /**
+     * Format user data for login API response.
+     *
+     * @param User $user
+     * @param array $roles
+     * @return array
+     */
+    protected function formatUserResponse(User $user, array $roles): array
+    {
+        return [
+            'id' => $user->id,
+            'name' => $user->name,
+            'email' => $user->email,
+            'username' => $user->username,
+            'erpnext_user_id' => $user->erpnext_user_id,
+            'erpnext_token' => $user->erpnext_token,
+            'erpnext_synced_at' => $user->erpnext_synced_at ? $user->erpnext_synced_at->toISOString() : null,
+            'phone' => $user->phone,
+            'email_verified_at' => $user->email_verified_at ? $user->email_verified_at->toISOString() : null,
+            'status' => $user->status,
+            'created_at' => $user->created_at ? $user->created_at->toISOString() : null,
+            'updated_at' => $user->updated_at ? $user->updated_at->toISOString() : null,
+            'roles' => array_values($roles),
+        ];
     }
 
 

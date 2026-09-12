@@ -39,15 +39,12 @@ class ERPNextAuthTest extends TestCase
                 'success' => true,
                 'message' => 'Login successful',
                 'data' => [
-                    'erpnext_api_key' => 'frappe_key_123',
-                    'erpnext_api_secret' => 'frappe_secret_456',
-                    'erpnext_token' => 'token frappe_key_123:frappe_secret_456',
                     'user' => [
                         'email' => 'apitestuser@example.com',
                         'name' => 'API Test User',
+                        'erpnext_token' => 'token frappe_key_123:frappe_secret_456',
+                        'roles' => ['Warehouse Manager', 'Picker'],
                     ],
-                    'roles' => ['Warehouse Manager', 'Picker'],
-                    'role' => 'Warehouse Manager',
                 ],
             ]);
 
@@ -158,19 +155,17 @@ class ERPNextAuthTest extends TestCase
         $response->assertStatus(200)
             ->assertJson([
                 'success' => true,
+                'message' => 'Login successful',
                 'data' => [
-                    'erpnext_api_key' => 'new_key_999',
-                    'erpnext_api_secret' => 'new_secret_888',
-                    'erpnext_token' => 'token new_key_999:new_secret_888',
-                    'api_key' => 'new_key_999',
-                    'api_secret' => 'new_secret_888',
-                    'user_creds' => [
-                        'api_key' => 'new_key_999',
-                        'api_secret' => 'new_secret_888',
-                        'token' => 'token new_key_999:new_secret_888',
+                    'user' => [
+                        'email' => 'repeatuser@example.com',
+                        'erpnext_token' => 'token new_key_999:new_secret_888',
+                        'roles' => ['Picker'],
                     ],
                 ],
             ]);
+
+        $this->assertNotNull($response->json('data.token'));
 
         $this->assertDatabaseHas('users', [
             'email' => 'repeatuser@example.com',
@@ -206,17 +201,17 @@ class ERPNextAuthTest extends TestCase
         $response->assertStatus(200)
             ->assertJson([
                 'success' => true,
+                'message' => 'Login successful',
                 'data' => [
-                    'erpnext_api_key' => 'be50da67694f729',
-                    'erpnext_api_secret' => '59a1c496f342415',
-                    'erpnext_token' => 'token be50da67694f729:59a1c496f342415',
-                    'user_creds' => [
-                        'api_key' => 'be50da67694f729',
-                        'api_secret' => '59a1c496f342415',
-                        'token' => 'token be50da67694f729:59a1c496f342415',
+                    'user' => [
+                        'email' => 'freshsecret@example.com',
+                        'erpnext_token' => 'token be50da67694f729:59a1c496f342415',
+                        'roles' => ['Picker'],
                     ],
                 ],
             ]);
+
+        $this->assertNotNull($response->json('data.token'));
     }
 
     public function test_login_parses_user_details_and_user_creds_nested_structure()
@@ -251,24 +246,18 @@ class ERPNextAuthTest extends TestCase
                 'success' => true,
                 'message' => 'Login successful',
                 'data' => [
-                    'api_key' => 'be50da67694f729',
-                    'api_secret' => '52a6d31d964dbd2',
-                    'erpnext_api_key' => 'be50da67694f729',
-                    'erpnext_api_secret' => '52a6d31d964dbd2',
-                    'erpnext_token' => 'token be50da67694f729:52a6d31d964dbd2',
-                    'user_creds' => [
-                        'api_key' => 'be50da67694f729',
-                        'api_secret' => '52a6d31d964dbd2',
-                        'token' => 'token be50da67694f729:52a6d31d964dbd2',
-                    ],
                     'user' => [
                         'email' => 'picker@example.com',
                         'name' => 'Picker',
+                        'username' => 'picker',
+                        'erpnext_user_id' => 'picker@example.com',
+                        'erpnext_token' => 'token be50da67694f729:52a6d31d964dbd2',
+                        'roles' => ['Picker'],
                     ],
-                    'roles' => ['Picker'],
-                    'role' => 'Picker',
                 ],
             ]);
+
+        $this->assertNotNull($response->json('data.token'));
 
         $this->assertDatabaseHas('users', [
             'email' => 'picker@example.com',

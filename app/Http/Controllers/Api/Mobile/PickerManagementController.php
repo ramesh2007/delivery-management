@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Http\Controllers\Api;
+namespace App\Http\Controllers\Api\Mobile;
 
 use App\Http\Controllers\Controller;
 use App\Models\Order;
@@ -14,7 +14,7 @@ use Illuminate\Support\Facades\Validator;
 
 class PickerManagementController extends Controller
 {
-    protected ShopifyService $shopifyService;
+        protected ShopifyService $shopifyService;
 
     public function __construct(ShopifyService $shopifyService)
     {
@@ -39,7 +39,7 @@ class PickerManagementController extends Controller
 
         $assignedToFilter = $request->query('assigned_to');
 
-        $query = Order::with([
+        $relations = [
             'items' => function ($q) use ($assignedToFilter) {
                 $q->where('status', 'pending');
                 if (!empty($assignedToFilter)) {
@@ -59,7 +59,22 @@ class PickerManagementController extends Controller
             'pickedUser',
             'packedUser',
             'deliveredUser',
-        ]);
+        ];
+
+        static $hasOrderInstallationsTable = null;
+        if ($hasOrderInstallationsTable === null) {
+            try {
+                $hasOrderInstallationsTable = \Illuminate\Support\Facades\Schema::hasTable('order_installations');
+            } catch (\Throwable $e) {
+                $hasOrderInstallationsTable = false;
+            }
+        }
+
+        if ($hasOrderInstallationsTable) {
+            $relations[] = 'items.installation';
+        }
+
+        $query = Order::with($relations);
 
         // Optional order status filter
         if ($request->has('status') && !empty($request->query('status'))) {
@@ -319,6 +334,12 @@ class PickerManagementController extends Controller
                                                 : null,
                                         ]
                                         : null,
+                                'is_installable' => (bool) $item->is_installable,
+                                'installation' => $item->installation ? [
+                                    'id' => $item->installation->id,
+                                    'installation_type' => $item->installation->installation_type,
+                                    'installation_level' => $item->installation->installation_level,
+                                ] : null,
                                 'is_flagged' => $item->is_flagged,
                                 'flag_reason' => $item->flag_reason,
                                 'assigned_user' => $item->assigned_to
@@ -2189,6 +2210,12 @@ class PickerManagementController extends Controller
                         'id' => $item->packer_verified_by ? (int) $item->packer_verified_by : null,
                         'name' => $item->packerVerifiedUser ? $item->packerVerifiedUser->name : ($item->packer_verified_user_name ?? 'Packer User'),
                         'verified_at' => $item->packer_verified_at ? $item->packer_verified_at->toIso8601String() : null,
+                    ] : null,
+                    'is_installable' => (bool) $item->is_installable,
+                    'installation' => $item->installation ? [
+                        'id' => $item->installation->id,
+                        'installation_type' => $item->installation->installation_type,
+                        'installation_level' => $item->installation->installation_level,
                     ] : null,
                     'is_flagged' => $item->is_flagged,
                     'flag_reason' => $item->flag_reason,

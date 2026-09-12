@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class OrderItem extends Model
 {
@@ -21,6 +22,7 @@ class OrderItem extends Model
         'image',
         'quantity',
         'unit_price',
+        'is_installable',
         'status',
         'is_flagged',
         'flag_reason',
@@ -43,6 +45,7 @@ class OrderItem extends Model
     ];
 
     protected $casts = [
+        'is_installable' => 'boolean',
         'is_flagged' => 'boolean',
         'is_packer_verified' => 'boolean',
         'packer_verified_at' => 'datetime',
@@ -51,6 +54,14 @@ class OrderItem extends Model
         'packed_at' => 'datetime',
         'delivered_at' => 'datetime',
     ];
+
+    /**
+     * Ensure is_installable always resolves to a boolean
+     */
+    public function getIsInstallableAttribute($value): bool
+    {
+        return (bool) $value;
+    }
 
     /**
      * Get discrepancies reported for this item.
@@ -114,5 +125,21 @@ class OrderItem extends Model
     public function packerVerifiedUser(): BelongsTo
     {
         return $this->belongsTo(User::class, 'packer_verified_by');
+    }
+
+    /**
+     * Get the installation associated with this order item.
+     */
+    public function installation(): HasOne
+    {
+        return $this->hasOne(OrderInstallation::class, 'order_item_id');
+    }
+
+    /**
+     * Get all installations associated with this order item.
+     */
+    public function installations(): HasMany
+    {
+        return $this->hasMany(OrderInstallation::class, 'order_item_id');
     }
 }

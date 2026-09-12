@@ -17,6 +17,15 @@ return Application::configure(basePath: dirname(__DIR__))
             'role' => \App\Http\Middleware\EnsureUserHasRole::class,
             'permission' => \App\Http\Middleware\EnsureUserHasPermission::class,
         ]);
+
+        $middleware->validateCsrfTokens(except: [
+            'shopify/webhooks/*',
+            'api/shopify/webhooks/*',
+            'webhooks/shopify/*',
+            'api/webhooks/shopify/*',
+            'shopify/webhooks',
+            'webhooks/shopify',
+        ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->shouldRenderJsonWhen(

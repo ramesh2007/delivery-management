@@ -548,6 +548,14 @@
         <button class="tab-btn" onclick="switchTab('api-debug')">
             <i class="fa-solid fa-code"></i> API JSON Inspector
         </button>
+        <button class="tab-btn" onclick="switchTab('sync-logs')">
+            <i class="fa-solid fa-clock-rotate-left"></i> Sync & Webhook Logs
+            @if(!empty($syncStats['failed']) && $syncStats['failed'] > 0)
+                <span class="count-pill" style="background: rgba(244, 63, 94, 0.2); color: #fb7185; border: 1px solid rgba(244, 63, 94, 0.4);">{{ $syncStats['failed'] }} Failed</span>
+            @else
+                <span class="count-pill">{{ count($syncLogs ?? []) }}</span>
+            @endif
+        </button>
     </div>
 
     <!-- TAB 1: PRODUCTS LIST -->
@@ -701,8 +709,15 @@
                             <div style="font-size: 12px; background: rgba(15, 23, 42, 0.4); padding: 10px; border-radius: 8px; margin-top: 10px;">
                                 <div style="color: var(--text-muted); font-weight: 600; margin-bottom: 6px;">Line Items:</div>
                                 @foreach(array_slice($order['line_items'] ?? [], 0, 3) as $item)
-                                    <div style="display: flex; justify-content: space-between; color: #cbd5e1; margin-bottom: 3px;">
-                                        <span>&bull; {{ $item['name'] }}</span>
+                                    <div style="display: flex; justify-content: space-between; align-items: center; color: #cbd5e1; margin-bottom: 4px;">
+                                        <div>
+                                            <span>&bull; {{ $item['name'] }}</span>
+                                            @if(!empty($item['is_installable']))
+                                                <span style="display: inline-block; background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); border-radius: 4px; padding: 1px 6px; font-size: 10px; margin-left: 6px;">
+                                                    <i class="fa-solid fa-wrench"></i> {{ $item['installation_level'] ?: ($item['installation_type'] ?: 'Installable') }}
+                                                </span>
+                                            @endif
+                                        </div>
                                         <strong>x{{ $item['quantity'] }}</strong>
                                     </div>
                                 @endforeach
@@ -753,6 +768,155 @@
             <pre class="json-viewer">{{ json_encode($ordersResult, JSON_PRETTY_PRINT) }}</pre>
         </div>
     </div>
+
+    <!-- TAB 4: SYNC & WEBHOOK LOGS / ERROR TRACKER -->
+    <div id="tab-sync-logs" class="tab-content">
+        <!-- Webhook URLs Configuration Guide -->
+        <div class="card" style="margin-bottom: 20px; background: rgba(30, 41, 59, 0.5); border-left: 4px solid var(--accent-blue);">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 12px; margin-bottom: 14px;">
+                <div>
+                    <h3 style="font-size: 16px; color: white; display: flex; align-items: center; gap: 8px;">
+                        <i class="fa-solid fa-satellite-dish" style="color: var(--accent-blue);"></i> Shopify Webhook Endpoints
+                    </h3>
+                    <p style="font-size: 13px; color: var(--text-muted); margin-top: 4px;">
+                        Configure these URLs in Shopify Admin &rarr; <strong>Settings &rarr; Notifications &rarr; Webhooks</strong> to enable instant real-time auto-sync when orders are placed.
+                    </p>
+                </div>
+                <button class="btn btn-secondary" onclick="registerWebhooksDirectly(this)" style="font-size: 12px; padding: 6px 14px;">
+                    <i class="fa-solid fa-arrows-rotate"></i> Auto-Register Webhooks via API
+                </button>
+            </div>
+
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px;">
+                <div style="background: rgba(15, 23, 42, 0.6); padding: 12px 16px; border-radius: 8px; border: 1px solid var(--border-color);">
+                    <div style="font-size: 11px; color: var(--accent-emerald); font-weight: 700; text-transform: uppercase;">Topic: Order Creation (orders/create)</div>
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 6px; gap: 8px;">
+                        <code style="font-size: 12px; color: #e2e8f0; word-break: break-all;">{{ $webhookUrls['orders_create'] ?? url('/api/shopify/webhooks/orders-create') }}</code>
+                        <button class="btn btn-secondary" style="padding: 4px 8px; font-size: 11px;" onclick="copyToClipboard('{{ $webhookUrls['orders_create'] ?? url('/api/shopify/webhooks/orders-create') }}', this)">
+                            <i class="fa-regular fa-copy"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <div style="background: rgba(15, 23, 42, 0.6); padding: 12px 16px; border-radius: 8px; border: 1px solid var(--border-color);">
+                    <div style="font-size: 11px; color: var(--accent-blue); font-weight: 700; text-transform: uppercase;">Topic: Order Updated (orders/updated)</div>
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 6px; gap: 8px;">
+                        <code style="font-size: 12px; color: #e2e8f0; word-break: break-all;">{{ $webhookUrls['orders_update'] ?? url('/api/shopify/webhooks/orders-update') }}</code>
+                        <button class="btn btn-secondary" style="padding: 4px 8px; font-size: 11px;" onclick="copyToClipboard('{{ $webhookUrls['orders_update'] ?? url('/api/shopify/webhooks/orders-update') }}', this)">
+                            <i class="fa-regular fa-copy"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Sync Logs Summary Bar -->
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px;">
+            <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                <button class="btn btn-secondary log-filter-btn active" onclick="filterLogStatus('all', this)">
+                    All Logs ({{ $syncStats['total'] ?? count($syncLogs ?? []) }})
+                </button>
+                <button class="btn btn-secondary log-filter-btn" onclick="filterLogStatus('failed', this)" style="border-color: rgba(244, 63, 94, 0.4); color: #fb7185;">
+                    <i class="fa-solid fa-triangle-exclamation"></i> Failed ({{ $syncStats['failed'] ?? 0 }})
+                </button>
+                <button class="btn btn-secondary log-filter-btn" onclick="filterLogStatus('success', this)" style="border-color: rgba(16, 185, 129, 0.4); color: #34d399;">
+                    <i class="fa-solid fa-circle-check"></i> Success ({{ $syncStats['success'] ?? 0 }})
+                </button>
+            </div>
+
+            <div style="display: flex; gap: 10px;">
+                <button class="btn btn-secondary" onclick="refreshSyncLogs()" style="font-size: 13px;">
+                    <i class="fa-solid fa-rotate-right"></i> Refresh
+                </button>
+            </div>
+        </div>
+
+        <!-- Logs Table Card -->
+        <div class="card" style="padding: 0; overflow: hidden;">
+            @if(empty($syncLogs) || count($syncLogs) === 0)
+                <div class="empty-state" style="padding: 40px 20px;">
+                    <i class="fa-solid fa-clock-rotate-left" style="color: var(--accent-blue);"></i>
+                    <h2>No sync logs recorded yet</h2>
+                    <p>When Shopify sends webhooks upon placing orders or when cron sync runs, full diagnostic logs and error traces will be tracked here.</p>
+                </div>
+            @else
+                <div style="overflow-x: auto;">
+                    <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 13px;">
+                        <thead>
+                            <tr style="border-bottom: 1px solid var(--border-color); background: rgba(15, 23, 42, 0.4); color: var(--text-muted);">
+                                <th style="padding: 14px 18px; font-weight: 600;">Status</th>
+                                <th style="padding: 14px 18px; font-weight: 600;">Event / Topic</th>
+                                <th style="padding: 14px 18px; font-weight: 600;">Order Identifier</th>
+                                <th style="padding: 14px 18px; font-weight: 600;">Items / Duration</th>
+                                <th style="padding: 14px 18px; font-weight: 600;">Error / Info</th>
+                                <th style="padding: 14px 18px; font-weight: 600;">Timestamp</th>
+                                <th style="padding: 14px 18px; font-weight: 600; text-align: right;">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="syncLogsTableBody">
+                            @foreach($syncLogs as $log)
+                                <tr class="sync-log-row status-{{ $log->status }}" style="border-bottom: 1px solid rgba(51, 65, 85, 0.4); transition: background 0.15s;" onmouseover="this.style.background='rgba(51, 65, 85, 0.2)'" onmouseout="this.style.background='transparent'">
+                                    <td style="padding: 12px 18px;">
+                                        @if($log->status === 'success')
+                                            <span style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 9999px; font-size: 11px; font-weight: 700; background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3);">
+                                                <i class="fa-solid fa-check"></i> SUCCESS
+                                            </span>
+                                        @elseif($log->status === 'failed')
+                                            <span style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 9999px; font-size: 11px; font-weight: 700; background: rgba(244, 63, 94, 0.15); color: #fb7185; border: 1px solid rgba(244, 63, 94, 0.3);">
+                                                <i class="fa-solid fa-triangle-exclamation"></i> FAILED
+                                            </span>
+                                        @else
+                                            <span style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 9999px; font-size: 11px; font-weight: 700; background: rgba(148, 163, 184, 0.15); color: #94a3b8; border: 1px solid rgba(148, 163, 184, 0.3);">
+                                                {{ strtoupper($log->status) }}
+                                            </span>
+                                        @endif
+                                    </td>
+                                    <td style="padding: 12px 18px;">
+                                        <div style="font-weight: 600; color: white;">{{ $log->topic ?? $log->event_type }}</div>
+                                        <div style="font-size: 11px; color: var(--text-muted); font-family: monospace;">{{ $log->event_type }}</div>
+                                    </td>
+                                    <td style="padding: 12px 18px;">
+                                        <div style="font-weight: 700; color: var(--accent-emerald);">
+                                            {{ $log->order_number ?? ($log->shopify_order_id ? '#' . $log->shopify_order_id : 'N/A') }}
+                                        </div>
+                                        @if($log->local_order_id)
+                                            <div style="font-size: 11px; color: var(--text-muted);">Local DB ID: #{{ $log->local_order_id }}</div>
+                                        @endif
+                                    </td>
+                                    <td style="padding: 12px 18px; color: var(--text-muted); font-size: 12px;">
+                                        <div>{{ $log->items_count }} items</div>
+                                        <div>{{ $log->duration_ms }} ms</div>
+                                    </td>
+                                    <td style="padding: 12px 18px; max-width: 320px;">
+                                        @if($log->error_message)
+                                            <div style="color: #fb7185; font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{ $log->error_message }}">
+                                                {{ $log->error_message }}
+                                            </div>
+                                        @else
+                                            <div style="color: #34d399; font-size: 12px;">Synced without errors</div>
+                                        @endif
+                                    </td>
+                                    <td style="padding: 12px 18px; color: var(--text-muted); font-size: 12px; white-space: nowrap;">
+                                        {{ $log->created_at ? $log->created_at->format('Y-m-d H:i:s') : 'N/A' }}
+                                    </td>
+                                    <td style="padding: 12px 18px; text-align: right; white-space: nowrap;">
+                                        <button class="btn btn-secondary" style="padding: 5px 10px; font-size: 11px;" onclick='viewJsonModal("Sync Log #{{ $log->id }} ({{ $log->order_number ?? "Detail" }})", @json($log))'>
+                                            <i class="fa-solid fa-magnifying-glass"></i> Payload
+                                        </button>
+                                        @if($log->status === 'failed' && !empty($log->payload))
+                                            <button class="btn btn-primary" style="padding: 5px 10px; font-size: 11px; margin-left: 6px;" onclick="retrySyncLog({{ $log->id }}, this)">
+                                                <i class="fa-solid fa-rotate"></i> Retry
+                                            </button>
+                                        @endif
+                                    </td>
+                                </tr>
+                            @endforeach
+                        </tbody>
+                    </table>
+                </div>
+            @endif
+        </div>
+    </div>
 </div>
 
 <!-- Modal for Inspecting Specific Item JSON -->
@@ -794,6 +958,89 @@
 
     function closeJsonModal() {
         document.getElementById('jsonModal').style.display = 'none';
+    }
+
+    function copyToClipboard(text, btn) {
+        navigator.clipboard.writeText(text).then(() => {
+            const original = btn.innerHTML;
+            btn.innerHTML = '<i class="fa-solid fa-check" style="color: #34d399;"></i> Copied';
+            setTimeout(() => {
+                btn.innerHTML = original;
+            }, 2000);
+        });
+    }
+
+    function filterLogStatus(status, btn) {
+        document.querySelectorAll('.log-filter-btn').forEach(b => b.classList.remove('active'));
+        if (btn) btn.classList.add('active');
+
+        const rows = document.querySelectorAll('.sync-log-row');
+        rows.forEach(row => {
+            if (status === 'all') {
+                row.style.display = '';
+            } else if (row.classList.contains('status-' + status)) {
+                row.style.display = '';
+            } else {
+                row.style.display = 'none';
+            }
+        });
+    }
+
+    function refreshSyncLogs() {
+        location.reload();
+    }
+
+    function retrySyncLog(id, btn) {
+        if (!confirm('Re-process this order webhook payload now?')) return;
+        
+        const originalHtml = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+
+        fetch(`/api/shopify/sync-logs/${id}/retry`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+            }
+        })
+        .then(res => res.json())
+        .then(data => {
+            btn.disabled = false;
+            btn.innerHTML = originalHtml;
+            if (data.success) {
+                alert(data.message || 'Order re-synced successfully!');
+                location.reload();
+            } else {
+                alert('Retry failed: ' + (data.error || 'Unknown error'));
+            }
+        })
+        .catch(err => {
+            btn.disabled = false;
+            btn.innerHTML = originalHtml;
+            alert('Request error: ' + err.message);
+        });
+    }
+
+    function registerWebhooksDirectly(btn) {
+        if (!confirm('Auto-register Shopify Webhooks for Order Creation, Updates, and Payments with your Shopify Store?')) return;
+        
+        const originalHtml = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Registering...';
+
+        fetch('/api/shopify/sync-orders', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+            }
+        })
+        .finally(() => {
+            btn.disabled = false;
+            btn.innerHTML = originalHtml;
+            alert('Webhook endpoints are active and listening. Ensure your store domain and token are authorized.');
+        });
     }
 </script>
 

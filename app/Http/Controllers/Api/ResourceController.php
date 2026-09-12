@@ -38,6 +38,7 @@ class ResourceController extends Controller
                 'items.pickedUser',
                 'items.packedUser',
                 'items.deliveredUser',
+                'items.installation',
                 'assignedUser',
                 'deliveredUser',
                 'payment',
@@ -182,7 +183,7 @@ class ResourceController extends Controller
         $city = $order['shipping_address']['city'] ?? $order['customer']['default_address']['city'] ?? 'Doha';
         $zone = $order['shipping_address']['province'] ?? $order['shipping_address']['city'] ?? 'Zone A';
 
-        $fulfillmentStatus = $order['fulfillment_status'] ?: 'unfulfilled';
+        $fulfillmentStatus = !empty($order['fulfillment_status']) ? $order['fulfillment_status'] : 'unfulfilled';
         $shopifyStatus = ucfirst($fulfillmentStatus); // Unfulfilled, Fulfilled, Partial
 
         // Default Shopify status calculation
@@ -280,6 +281,14 @@ class ResourceController extends Controller
                 'image' => $image,
                 'product_id' => $item['product_id'] ?? null,
                 'variant_id' => $item['variant_id'] ?? null,
+                'is_installable' => (bool) ($item['is_installable'] ?? false),
+                'installation_type' => $item['installation_type'] ?? null,
+                'installation_level' => $item['installation_level'] ?? null,
+                'installation' => $item['installation'] ?? (!empty($item['installation_type']) || !empty($item['installation_level']) ? [
+                    'installation_type' => $item['installation_type'] ?? null,
+                    'installation_level' => $item['installation_level'] ?? null,
+                ] : null),
+                'metafields' => $item['metafields'] ?? [],
             ];
         }, $lineItems, array_keys($lineItems));
 
@@ -333,7 +342,7 @@ class ResourceController extends Controller
             'custom_latitude' => $lat,
             'custom_longitude' => $lng,
             'custom_return_count' => count($order['refunds'] ?? []),
-            'custom_tags' => $order['tags'] ?: 'Standard',
+            'custom_tags' => !empty($order['tags']) ? $order['tags'] : 'Standard',
             'line_items' => $transformedLineItems,
         ];
 
@@ -1006,6 +1015,24 @@ class ResourceController extends Controller
                     // Driver / Delivery user details
                     $item['delivered_by'] = $dbItem->delivered_by ? (int) $dbItem->delivered_by : ($dbItem->delivered_user_name ?: null);
                     $item['delivered_user_name'] = $dbItem->delivered_user_name ?: ($dbItem->deliveredUser->name ?? null);
+
+                    // Installation details
+                    $item['is_installable'] = (bool) $dbItem->is_installable;
+                    $dbItemInstallation = $dbItem->relationLoaded('installation') ? $dbItem->installation : $dbItem->installation()->first();
+                    if ($dbItemInstallation) {
+                        $item['installation_type'] = $dbItemInstallation->installation_type;
+                        $item['installation_level'] = $dbItemInstallation->installation_level;
+                        $item['installation'] = [
+                            'id' => $dbItemInstallation->id,
+                            'installation_type' => $dbItemInstallation->installation_type,
+                            'installation_level' => $dbItemInstallation->installation_level,
+                        ];
+                    } elseif (!empty($item['installation_type']) || !empty($item['installation_level'])) {
+                        $item['installation'] = [
+                            'installation_type' => $item['installation_type'] ?? null,
+                            'installation_level' => $item['installation_level'] ?? null,
+                        ];
+                    }
                 } else {
                     $item['assigned_to'] = $item['assigned_to'] ?? null;
                     $item['assigned_user_name'] = $item['assigned_user_name'] ?? null;

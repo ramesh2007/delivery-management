@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Http\Controllers\Api;
+namespace App\Http\Controllers\Api\Mobile;
 
 use App\Http\Controllers\Controller;
 use App\Models\Order;
@@ -16,7 +16,7 @@ use Illuminate\Support\Facades\Validator;
 
 class PackerManagementController extends Controller
 {
-    protected ShopifyService $shopifyService;
+        protected ShopifyService $shopifyService;
 
     public function __construct(ShopifyService $shopifyService)
     {

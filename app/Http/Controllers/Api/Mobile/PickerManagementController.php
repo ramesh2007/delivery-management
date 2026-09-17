@@ -450,15 +450,30 @@ class PickerManagementController extends Controller
         $cleanId = ltrim($idStr, '#');
 
         // Check if $id refers to a specific Order ID or Order Number directly
-        $orderMatch = Order::where('id', $idStr)
-            ->orWhere('order_number', $idStr)
-            ->orWhere('order_number', $cleanId)
-            ->orWhere('order_number', '#' . $cleanId)
-            ->first();
+        $orderMatch = Order::with([
+            'items.assignedUser',
+            'items.pickedUser',
+            'items.packedUser',
+            'items.deliveredUser',
+            'items.packerVerifiedUser',
+            'assignedUser',
+            'deliveredUser',
+            'driverAssignment',
+            'logs.user',
+        ])
+        ->where('id', $idStr)
+        ->orWhere('order_number', $idStr)
+        ->orWhere('order_number', $cleanId)
+        ->orWhere('order_number', '#' . $cleanId)
+        ->first();
 
         if ($orderMatch) {
-            $resourceController = app(\App\Http\Controllers\Api\ResourceController::class);
-            return $resourceController->salesOrderDetail($idStr);
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    $this->formatOrderDetails($orderMatch),
+                ],
+            ]);
         }
 
         // Auto-sync orders from Shopify silently
@@ -471,15 +486,30 @@ class PickerManagementController extends Controller
         }
 
         // Re-check single order match after sync
-        $orderMatchAfterSync = Order::where('id', $idStr)
-            ->orWhere('order_number', $idStr)
-            ->orWhere('order_number', $cleanId)
-            ->orWhere('order_number', '#' . $cleanId)
-            ->first();
+        $orderMatchAfterSync = Order::with([
+            'items.assignedUser',
+            'items.pickedUser',
+            'items.packedUser',
+            'items.deliveredUser',
+            'items.packerVerifiedUser',
+            'assignedUser',
+            'deliveredUser',
+            'driverAssignment',
+            'logs.user',
+        ])
+        ->where('id', $idStr)
+        ->orWhere('order_number', $idStr)
+        ->orWhere('order_number', $cleanId)
+        ->orWhere('order_number', '#' . $cleanId)
+        ->first();
 
         if ($orderMatchAfterSync) {
-            $resourceController = app(\App\Http\Controllers\Api\ResourceController::class);
-            return $resourceController->salesOrderDetail($idStr);
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    $this->formatOrderDetails($orderMatchAfterSync),
+                ],
+            ]);
         }
 
         // Check for orders assigned to user_id
@@ -497,6 +527,7 @@ class PickerManagementController extends Controller
 
             'assignedUser',
             'deliveredUser',
+            'driverAssignment',
             'logs.user',
         ])
         ->whereHas('items', function ($q) use ($idStr) {
@@ -537,9 +568,11 @@ class PickerManagementController extends Controller
             ]);
         }
 
-        // Fallback: lookup single order details via ResourceController
-        $resourceController = app(\App\Http\Controllers\Api\ResourceController::class);
-        return $resourceController->salesOrderDetail($idStr);
+        return response()->json([
+            'success' => false,
+            'message' => 'Order not found.',
+            'data' => [],
+        ], 404);
     }
 
     /**
@@ -2177,7 +2210,11 @@ class PickerManagementController extends Controller
                 'id' => $order->delivered_by ? (int) $order->delivered_by : null,
                 'name' => $order->deliveredUser ? $order->deliveredUser->name : ($order->delivered_user_name ?? 'Driver User'),
                 'delivered_at' => $order->delivered_at ? $order->delivered_at->toIso8601String() : null,
-            ] : null,
+            ] : ($order->driverAssignment ? [
+                'id' => (int) $order->driverAssignment->assigned_driver_user_id,
+                'name' => $order->driverAssignment->driver_name,
+                'delivered_at' => $order->driverAssignment->delivered_at ? $order->driverAssignment->delivered_at->toIso8601String() : null,
+            ] : null),
             'pickers' => $pickers,
             'packers' => $packers,
             'customer' => [
@@ -2200,33 +2237,17 @@ class PickerManagementController extends Controller
                     'product_code' => $item->product_code,
                     'barcode' => $item->barcode,
                     'product_name' => $item->product_name,
-                    'image' => $item->image,
-                    'image_url' => $item->image,
-                    'quantity' => $item->quantity,
+                    'quantity' => (int) $item->quantity,
                     'unit_price' => (float) $item->unit_price,
                     'status' => $item->status,
+                    'is_flagged' => (bool) $item->is_flagged,
+                    'flag_reason' => $item->flag_reason,
                     'is_packer_verified' => (bool) $item->is_packer_verified,
                     'packer_verified_user' => ($item->packer_verified_by || $item->packer_verified_user_name) ? [
                         'id' => $item->packer_verified_by ? (int) $item->packer_verified_by : null,
                         'name' => $item->packerVerifiedUser ? $item->packerVerifiedUser->name : ($item->packer_verified_user_name ?? 'Packer User'),
                         'verified_at' => $item->packer_verified_at ? $item->packer_verified_at->toIso8601String() : null,
                     ] : null,
-                    'is_installable' => (bool) $item->is_installable,
-                    'installation' => $item->installation ? [
-                        'id' => $item->installation->id,
-                        'installation_type' => $item->installation->installation_type,
-                        'installation_level' => $item->installation->installation_level,
-                    ] : null,
-                    'is_flagged' => $item->is_flagged,
-                    'flag_reason' => $item->flag_reason,
-                    'assigned_to' => $item->assigned_to ? (int) $item->assigned_to : null,
-                    'assigned_user_name' => $item->assigned_user_name ?: ($item->assignedUser->name ?? null),
-                    'picked_by' => $item->picked_by ? (int) $item->picked_by : ($item->picked_user_name ?: null),
-                    'picked_user_name' => $item->picked_user_name ?: ($item->pickedUser->name ?? null),
-                    'packed_by' => $item->packed_by ? (int) $item->packed_by : ($item->packed_user_name ?: null),
-                    'packed_user_name' => $item->packed_user_name ?: ($item->packedUser->name ?? null),
-                    'delivered_by' => $item->delivered_by ? (int) $item->delivered_by : ($item->delivered_user_name ?: null),
-                    'delivered_user_name' => $item->delivered_user_name ?: ($item->deliveredUser->name ?? null),
                     'assigned_user' => $item->assigned_to ? [
                         'id' => (int) $item->assigned_to,
                         'name' => $item->assignedUser ? $item->assignedUser->name : ($item->assigned_user_name ?? 'Picker User'),
@@ -2250,6 +2271,36 @@ class PickerManagementController extends Controller
                     'picked_at' => $item->picked_at ? $item->picked_at->toIso8601String() : null,
                     'packed_at' => $item->packed_at ? $item->packed_at->toIso8601String() : null,
                     'delivered_at' => $item->delivered_at ? $item->delivered_at->toIso8601String() : null,
+                ];
+            })->values(),
+            'logs' => ($order->relationLoaded('logs') ? $order->logs : $order->logs()->with('user')->get())->map(function ($log) {
+                return [
+                    'id' => $log->id,
+                    'order_id' => $log->order_id,
+                    'order_item_id' => $log->order_item_id,
+                    'user_id' => $log->user_id,
+                    'user_name' => $log->user_name,
+                    'action' => $log->action,
+                    'old_status' => $log->old_status,
+                    'new_status' => $log->new_status,
+                    'notes' => $log->notes,
+                    'created_at' => $log->created_at ? $log->created_at->toIso8601String() : null,
+                    'updated_at' => $log->updated_at ? $log->updated_at->toIso8601String() : null,
+                    'user' => $log->user ? [
+                        'id' => $log->user->id,
+                        'name' => $log->user->name,
+                        'email' => $log->user->email,
+                        'username' => $log->user->username ?? null,
+                        'erpnext_user_id' => $log->user->erpnext_user_id ?? null,
+                        'erpnext_token' => $log->user->erpnext_token ?? null,
+                        'erpnext_synced_at' => $log->user->erpnext_synced_at ?? null,
+                        'phone' => $log->user->phone ?? null,
+                        'email_verified_at' => $log->user->email_verified_at ? $log->user->email_verified_at->toIso8601String() : null,
+                        'role' => $log->user->role ?? null,
+                        'status' => $log->user->status ?? null,
+                        'created_at' => $log->user->created_at ? $log->user->created_at->toISOString() : null,
+                        'updated_at' => $log->user->updated_at ? $log->user->updated_at->toISOString() : null,
+                    ] : null,
                 ];
             })->values(),
             'created_at' => $order->created_at ? $order->created_at->toIso8601String() : null,

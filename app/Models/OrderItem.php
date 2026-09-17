@@ -142,4 +142,12 @@ class OrderItem extends Model
     {
         return $this->hasMany(OrderInstallation::class, 'order_item_id');
     }
+
+    /**
+     * Get return and replacement records for this order item.
+     */
+    public function returnReplacements(): HasMany
+    {
+        return $this->hasMany(OrderReturnReplacement::class, 'order_item_id')->orderBy('created_at', 'desc');
+    }
 }

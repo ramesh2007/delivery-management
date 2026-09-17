@@ -11,6 +11,9 @@ use App\Http\Controllers\ShopifyController;
 use App\Http\Controllers\Api\Admin\OrderStatusApiController;
 use App\Http\Controllers\Api\Admin\DriverManagementController;
 use App\Http\Controllers\Api\Admin\PaymentsManagementController;
+use App\Http\Controllers\Api\Admin\ScheduledInstallationController;
+use App\Http\Controllers\Api\Admin\FlagController;
+use App\Http\Controllers\Api\Admin\ReturnReplacementController;
 
 //Mobile App Controllers
 use App\Http\Controllers\Api\OrderManagementController;
@@ -21,11 +24,12 @@ use App\Http\Controllers\Api\Mobile\DiscrepancyController;
 
 
 
+
 Route::post('/login', [AuthController::class, 'login']);
 Route::post('/users', [UserController::class, 'store']); // Public registration
 
 //Admin Routes
-Route::prefix('admin')->group(function(){
+Route::prefix('admin')->group(function () {
     Route::get('/ping', [\App\Http\Controllers\Api\ResourceController::class, 'ping']);
 
     // Dedicated Order Status List Endpoints (Paginated for Large Datasets)
@@ -58,9 +62,8 @@ Route::prefix('admin')->group(function(){
     Route::match(['get', 'post'], '/orders/installation-items', [OrderStatusApiController::class, 'installationOrders']);
     Route::match(['get', 'post'], '/orders/status/cancelled-delivery', [OrderStatusApiController::class, 'cancelledDelivery']);
     Route::match(['get', 'post'], '/orders/cancelled-delivery', [OrderStatusApiController::class, 'cancelledDelivery']);
-    Route::get('/orders/status/flagged', [OrderStatusApiController::class, 'flaggedOrders']);
-    Route::get('/orders/flagged', [OrderStatusApiController::class, 'flaggedOrders']);
-    Route::get('/orders/flagged-items', [OrderStatusApiController::class, 'flaggedOrders']);
+
+
 
     //driver assignment endpoints
     Route::post('/driver/assign', [DriverManagementController::class, 'assignDriver']);
@@ -71,14 +74,28 @@ Route::prefix('admin')->group(function(){
     Route::get('/drivers', [DriverManagementController::class, 'index']);
     // Payment Status Update Endpoint
     Route::post('/orders/update-payment-status', [PaymentsManagementController::class, 'updatePaymentStatus']);
+
+
+
+    // Scheduled and Installation Controller
+
+    Route::match(['get', 'post'], '/scheduled-installation', [ScheduledInstallationController::class, 'store']);
+    Route::get('/scheduled-installation/list', [ScheduledInstallationController::class, 'index']);
+
+    // Flagged Orders Management Endpoints
+
+    Route::get('/orders/flagged', [FlagController::class, 'index']);
+
     // Create Return / Replacement Endpoint
-    Route::post('/orders/return-replacement', [PaymentsManagementController::class, 'createReturnReplacement']);
+    Route::post('/orders/return-replacement', [ReturnReplacementController::class, 'createReturnReplacement']);
+    Route::get('/orders/get-return-replacements', [ReturnReplacementController::class, 'getReturnReplacements']);
 
 });
 
 
 
 //Mobile App Routes
+
 // Picker & Packer Management List Endpoints
 Route::get('/get-pickers-list', [PickerManagementController::class, 'getPickersList']);
 Route::get('/get-packers-list', [PackerManagementController::class, 'getPackersList']);
@@ -169,7 +186,6 @@ Route::get('/orders/driver/discrepancies/{driver_user_id?}', [DeliveryManagement
 Route::post('/orders/items/flag-discrepancy', [DiscrepancyController::class, 'flagItemDiscrepancy']);
 Route::get('/orders/items/discrepancies', [DiscrepancyController::class, 'getDiscrepancies']);
 Route::post('/orders/items/resolve-discrepancy', [DiscrepancyController::class, 'resolveDiscrepancy']);
-
 Route::get('/order-management/orders/{id}', [OrderManagementController::class, 'show']);
 Route::post('/orders/{id}/status', [OrderManagementController::class, 'updateOrderStatus']);
 Route::get('/orders/{id}/logs', [OrderManagementController::class, 'getLogs']);
@@ -244,3 +260,4 @@ Route::get('/admin/order/{order}', [\App\Http\Controllers\Api\ResourceController
     ->where('order', '.*');
 Route::get('/order-details/{order}', [\App\Http\Controllers\Api\ResourceController::class, 'salesOrderDetail'])
     ->where('order', '.*');
+

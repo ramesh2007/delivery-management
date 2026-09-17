@@ -130,6 +130,10 @@ class Order extends Model
     {
         return $this->hasOne(OrderPayment::class, 'order_id');
     }
+    public function returnReplacements(): HasMany
+    {
+        return $this->hasMany(OrderReturnReplacement::class, 'order_id')->orderBy('created_at', 'desc');
+    }
 }
 
 

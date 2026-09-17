@@ -16,6 +16,11 @@ class OrderInstallation extends Model
         'order_item_id',
         'installation_type',
         'installation_level',
+        'is_scheduled_assigned',
+    ];
+
+    protected $casts = [
+        'is_scheduled_assigned' => 'boolean',
     ];
 
     /**

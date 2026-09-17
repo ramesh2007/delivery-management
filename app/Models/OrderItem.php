@@ -64,6 +64,14 @@ class OrderItem extends Model
     }
 
     /**
+     * Helper to get whether this item has its installation scheduled.
+     */
+    public function getIsScheduledAssignedAttribute(): bool
+    {
+        return (bool) ($this->installation?->is_scheduled_assigned ?? false);
+    }
+
+    /**
      * Get discrepancies reported for this item.
      */
     public function discrepancies(): HasMany
@@ -142,10 +150,6 @@ class OrderItem extends Model
     {
         return $this->hasMany(OrderInstallation::class, 'order_item_id');
     }
-
-    /**
-     * Get return and replacement records for this order item.
-     */
     public function returnReplacements(): HasMany
     {
         return $this->hasMany(OrderReturnReplacement::class, 'order_item_id')->orderBy('created_at', 'desc');

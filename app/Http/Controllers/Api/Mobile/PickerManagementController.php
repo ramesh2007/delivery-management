@@ -450,15 +450,30 @@ class PickerManagementController extends Controller
         $cleanId = ltrim($idStr, '#');
 
         // Check if $id refers to a specific Order ID or Order Number directly
-        $orderMatch = Order::where('id', $idStr)
-            ->orWhere('order_number', $idStr)
-            ->orWhere('order_number', $cleanId)
-            ->orWhere('order_number', '#' . $cleanId)
-            ->first();
+        $orderMatch = Order::with([
+            'items.assignedUser',
+            'items.pickedUser',
+            'items.packedUser',
+            'items.deliveredUser',
+            'items.packerVerifiedUser',
+            'assignedUser',
+            'deliveredUser',
+            'driverAssignment',
+            'logs.user',
+        ])
+        ->where('id', $idStr)
+        ->orWhere('order_number', $idStr)
+        ->orWhere('order_number', $cleanId)
+        ->orWhere('order_number', '#' . $cleanId)
+        ->first();
 
         if ($orderMatch) {
-            $resourceController = app(\App\Http\Controllers\Api\ResourceController::class);
-            return $resourceController->salesOrderDetail($idStr);
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    $this->formatOrderDetails($orderMatch),
+                ],
+            ]);
         }
 
         // Auto-sync orders from Shopify silently
@@ -471,15 +486,30 @@ class PickerManagementController extends Controller
         }
 
         // Re-check single order match after sync
-        $orderMatchAfterSync = Order::where('id', $idStr)
-            ->orWhere('order_number', $idStr)
-            ->orWhere('order_number', $cleanId)
-            ->orWhere('order_number', '#' . $cleanId)
-            ->first();
+        $orderMatchAfterSync = Order::with([
+            'items.assignedUser',
+            'items.pickedUser',
+            'items.packedUser',
+            'items.deliveredUser',
+            'items.packerVerifiedUser',
+            'assignedUser',
+            'deliveredUser',
+            'driverAssignment',
+            'logs.user',
+        ])
+        ->where('id', $idStr)
+        ->orWhere('order_number', $idStr)
+        ->orWhere('order_number', $cleanId)
+        ->orWhere('order_number', '#' . $cleanId)
+        ->first();
 
         if ($orderMatchAfterSync) {
-            $resourceController = app(\App\Http\Controllers\Api\ResourceController::class);
-            return $resourceController->salesOrderDetail($idStr);
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    $this->formatOrderDetails($orderMatchAfterSync),
+                ],
+            ]);
         }
 
         // Check for orders assigned to user_id
@@ -497,6 +527,7 @@ class PickerManagementController extends Controller
 
             'assignedUser',
             'deliveredUser',
+            'driverAssignment',
             'logs.user',
         ])
         ->whereHas('items', function ($q) use ($idStr) {
@@ -537,9 +568,11 @@ class PickerManagementController extends Controller
             ]);
         }
 
-        // Fallback: lookup single order details via ResourceController
-        $resourceController = app(\App\Http\Controllers\Api\ResourceController::class);
-        return $resourceController->salesOrderDetail($idStr);
+        return response()->json([
+            'success' => false,
+            'message' => 'Order not found.',
+            'data' => [],
+        ], 404);
     }
 
     /**

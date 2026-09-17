@@ -11,6 +11,13 @@ use App\Http\Controllers\ShopifyController;
 use App\Http\Controllers\Api\Admin\OrderStatusApiController;
 use App\Http\Controllers\Api\Admin\DriverManagementController;
 use App\Http\Controllers\Api\Admin\PaymentsManagementController;
+use App\Http\Controllers\Api\Admin\ScheduleController;
+use App\Http\Controllers\Api\Admin\PickerAdminController;
+use App\Http\Controllers\Api\Admin\PackerAdminController;
+use App\Http\Controllers\Api\Admin\ScheduledInstallationController;
+use App\Http\Controllers\Api\Admin\FlagController;
+use App\Http\Controllers\Api\Admin\ReturnReplacementController;
+
 
 //Mobile App Controllers
 use App\Http\Controllers\Api\OrderManagementController;
@@ -23,6 +30,12 @@ use App\Http\Controllers\Api\Mobile\DiscrepancyController;
 
 Route::post('/login', [AuthController::class, 'login']);
 Route::post('/users', [UserController::class, 'store']); // Public registration
+
+// Top-level aliases for installation & scheduled orders (backwards compatibility)
+Route::match(['get', 'post'], '/orders/status/installation', [OrderStatusApiController::class, 'installationOrders']);
+Route::match(['get', 'post'], '/orders/installation', [OrderStatusApiController::class, 'installationOrders']);
+Route::match(['get', 'post'], '/orders/status/scheduled-items', [ScheduleController::class, 'scheduledItems']);
+Route::match(['get', 'post'], '/orders/scheduled-items', [ScheduleController::class, 'scheduledItems']);
 
 //Admin Routes
 Route::prefix('admin')->group(function(){
@@ -73,6 +86,32 @@ Route::prefix('admin')->group(function(){
     Route::post('/orders/update-payment-status', [PaymentsManagementController::class, 'updatePaymentStatus']);
     // Create Return / Replacement Endpoint
     Route::post('/orders/return-replacement', [PaymentsManagementController::class, 'createReturnReplacement']);
+
+    // Schedule Endpoints (Assignment & Item-wise Scheduled Listing)
+    Route::post('/schedule/assign/{order_item_id?}', [ScheduleController::class, 'assignSchedule']);
+    Route::match(['get', 'post'], '/orders/status/scheduled-items', [ScheduleController::class, 'scheduledItems']);
+    Route::match(['get', 'post'], '/orders/status/scheduled', [ScheduleController::class, 'scheduledItems']);
+    Route::match(['get', 'post'], '/orders/status/scheduled-assigned', [ScheduleController::class, 'scheduledItems']);
+    Route::match(['get', 'post'], '/orders/scheduled-items', [ScheduleController::class, 'scheduledItems']);
+    Route::match(['get', 'post'], '/schedule/items', [ScheduleController::class, 'scheduledItems']);
+    Route::match(['get', 'post'], '/schedule/assigned-items', [ScheduleController::class, 'scheduledItems']);
+
+    //Pickers 
+    Route::get('/get-pickers-list', [PickerAdminController::class, 'getPickersList']);
+    //Packers
+    Route::get('/get-packers-list', [PackerAdminController::class, 'getPackersList']);
+    // Scheduled and Installation Controller
+
+    Route::match(['get', 'post'], '/scheduled-installation', [ScheduledInstallationController::class, 'store']);
+    Route::get('/scheduled-installation/list', [ScheduledInstallationController::class, 'index']);
+
+    // Flagged Orders Management Endpoints
+
+    Route::get('/orders/flagged', [FlagController::class, 'index']);
+
+    // Create Return / Replacement Endpoint
+    Route::post('/orders/return-replacement', [ReturnReplacementController::class, 'createReturnReplacement']);
+    Route::get('/orders/get-return-replacements', [ReturnReplacementController::class, 'getReturnReplacements']);
 
 });
 

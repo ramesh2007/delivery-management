@@ -6,14 +6,17 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\Order;
 use App\Services\ShopifyService;
+use App\Services\OrderDetailsService;
 
 class OrderStatusApiController extends Controller
 {
     protected ShopifyService $shopifyService;
+    protected OrderDetailsService $orderDetailsService;
 
-    public function __construct(ShopifyService $shopifyService)
+    public function __construct(ShopifyService $shopifyService, OrderDetailsService $orderDetailsService)
     {
         $this->shopifyService = $shopifyService;
+        $this->orderDetailsService = $orderDetailsService;
     }
 
     /**
@@ -263,13 +266,75 @@ class OrderStatusApiController extends Controller
      * 8. GET/POST /api/orders/delivered or /api/orders/status/delivered
      * Retrieve completed/delivered orders, optionally filtered by driver_id (via query param, body, or route param).
      */
-    public function delivered(Request $request, $driver_user_id = null)
+    // public function delivered(Request $request, $driver_user_id = null)
+    // {
+    //     $this->handleSilentSync($request);
+    //     $perPage = max(1, min((int) $request->input('per_page', $request->query('per_page', 15)), 100));
+
+    //     $rawJson = json_decode($request->getContent(), true) ?? [];
+
+    //     $driverId = $driver_user_id
+    //         ?? $request->input('driver_id')
+    //         ?? ($rawJson['driver_id'] ?? null)
+    //         ?? $request->input('driver_user_id')
+    //         ?? ($rawJson['driver_user_id'] ?? null)
+    //         ?? $request->input('user_id')
+    //         ?? ($rawJson['user_id'] ?? null)
+    //         ?? $request->input('assigned_driver_user_id')
+    //         ?? ($rawJson['assigned_driver_user_id'] ?? null)
+    //         ?? $request->query('driver_id')
+    //         ?? $request->query('driver_user_id')
+    //         ?? $request->query('user_id');
+
+    //     $query = $this->getBaseOrderQuery($request)
+    //         ->where(function ($q) {
+    //             $q->where('status', 'delivered')
+    //                 ->orWhereHas('driverAssignment', function ($dq) {
+    //                     $dq->where('driver_status', 'delivered')
+    //                         ->orWhere('order_status', 'delivered');
+    //                 });
+    //         });
+
+    //     if (!empty($driverId)) {
+    //         $query->where(function ($q) use ($driverId) {
+    //             $q->where('delivered_by', $driverId)
+    //                 ->orWhereHas('driverAssignment', function ($dq) use ($driverId) {
+    //                     $dq->where('assigned_driver_user_id', $driverId);
+    //                 });
+    //         });
+    //     }
+
+    //     $paginator = $query->orderBy('delivered_at', 'desc')
+    //         ->orderBy('updated_at', 'desc')
+    //         ->paginate($perPage);
+
+    //     return $this->buildPaginatedResponse($paginator, 'delivered', 'Delivered orders retrieved successfully.');
+    // }
+        public function delivered(Request $request, $driver_user_id = null)
     {
-        $this->handleSilentSync($request);
-        $perPage = max(1, min((int) $request->input('per_page', $request->query('per_page', 15)), 100));
-
+        /*
+        |--------------------------------------------------------------------------
+        | Per Page
+        |--------------------------------------------------------------------------
+        */
+        $perPage = max(
+            1,
+            min(
+                (int) $request->input(
+                    'per_page',
+                    $request->query('per_page', 15)
+                ),
+                100
+            )
+        );
+    
+        /*
+        |--------------------------------------------------------------------------
+        | Get Driver ID
+        |--------------------------------------------------------------------------
+        */
         $rawJson = json_decode($request->getContent(), true) ?? [];
-
+    
         $driverId = $driver_user_id
             ?? $request->input('driver_id')
             ?? ($rawJson['driver_id'] ?? null)
@@ -282,30 +347,249 @@ class OrderStatusApiController extends Controller
             ?? $request->query('driver_id')
             ?? $request->query('driver_user_id')
             ?? $request->query('user_id');
-
-        $query = $this->getBaseOrderQuery($request)
+    
+        /*
+        |--------------------------------------------------------------------------
+        | Base Order Query
+        |--------------------------------------------------------------------------
+        | Directly use orders + order_items.
+        | No Shopify sync.
+        |--------------------------------------------------------------------------
+        */
+        $query = Order::query()
+            ->with([
+                'items',
+    
+                // Uncomment later if required
+                // 'items.vendor',
+                // 'items.product',
+                // 'items.rack',
+                // 'items.bin',
+                // 'driverAssignment',
+            ])
             ->where(function ($q) {
+    
+                /*
+                | Order is delivered
+                */
                 $q->where('status', 'delivered')
+    
+                    /*
+                    | OR driver assignment is delivered
+                    */
                     ->orWhereHas('driverAssignment', function ($dq) {
-                        $dq->where('driver_status', 'delivered')
-                            ->orWhere('order_status', 'delivered');
+                        $dq->where(function ($subQuery) {
+                            $subQuery->where('driver_status', 'delivered')
+                                ->orWhere('order_status', 'delivered');
+                        });
                     });
             });
-
+    
+        /*
+        |--------------------------------------------------------------------------
+        | Driver Filter
+        |--------------------------------------------------------------------------
+        */
         if (!empty($driverId)) {
+    
             $query->where(function ($q) use ($driverId) {
+    
+                /*
+                | Order level driver
+                */
                 $q->where('delivered_by', $driverId)
+    
+                    /*
+                    | Driver assignment
+                    */
                     ->orWhereHas('driverAssignment', function ($dq) use ($driverId) {
                         $dq->where('assigned_driver_user_id', $driverId);
+                    })
+    
+                    /*
+                    | Order item level driver
+                    */
+                    ->orWhereHas('items', function ($iq) use ($driverId) {
+                        $iq->where('delivered_by', $driverId);
                     });
             });
         }
-
-        $paginator = $query->orderBy('delivered_at', 'desc')
+    
+        /*
+        |--------------------------------------------------------------------------
+        | Only orders having delivered items
+        |--------------------------------------------------------------------------
+        */
+        $query->whereHas('items', function ($q) {
+            $q->where('status', 'delivered');
+        });
+    
+        /*
+        |--------------------------------------------------------------------------
+        | Pagination
+        |--------------------------------------------------------------------------
+        */
+        $orders = $query
+            ->orderBy('delivered_at', 'desc')
             ->orderBy('updated_at', 'desc')
             ->paginate($perPage);
-
-        return $this->buildPaginatedResponse($paginator, 'delivered', 'Delivered orders retrieved successfully.');
+    
+        /*
+        |--------------------------------------------------------------------------
+        | Format Orders
+        |--------------------------------------------------------------------------
+        */
+        $orders->getCollection()->transform(function ($order) {
+    
+            return [
+    
+                /*
+                |--------------------------------------------------------------------------
+                | Order Details
+                |--------------------------------------------------------------------------
+                */
+                'order_number' => $order->order_number,
+    
+                'created_at' => $order->created_at
+                    ? $order->created_at->toIso8601String()
+                    : null,
+    
+                'status' => $order->status,
+    
+                'financial_status' => $order->financial_status,
+    
+                'total_price' => $order->total_price,
+    
+                'currency' => $order->currency,
+    
+                'customer_name' => $order->customer_name,
+    
+                'email' => $order->email,
+    
+                'phone' => $order->customer_phone ?? $order->phone,
+    
+                'bag_count' => $order->bag_count,
+    
+                /*
+                |--------------------------------------------------------------------------
+                | Shipping
+                |--------------------------------------------------------------------------
+                | Uncomment later if required.
+                |--------------------------------------------------------------------------
+                */
+    
+                // 'shipping_address' => $order->shipping_address,
+    
+                /*
+                |--------------------------------------------------------------------------
+                | Delivered Items
+                |--------------------------------------------------------------------------
+                */
+                'items' => $order->items
+                    ->filter(function ($item) {
+                        return $item->status === 'delivered';
+                    })
+                    ->map(function ($item) {
+    
+                        return [
+    
+                            'line_item_id' => $item->line_item_id,
+    
+                            'product_name' => $item->product_name,
+    
+                            'sku' => $item->sku ?? $item->product_code,
+    
+                            'barcode' => $item->barcode,
+    
+                            'quantity' => (int) $item->quantity,
+    
+                            'unit_price' => $item->unit_price,
+    
+                            'vendor' => $item->vendor,
+    
+                            'rack' => $item->rack,
+    
+                            'bin' => $item->bin,
+    
+                            'imageUrl' => $item->imageUrl
+                                ?? $item->image_url
+                                ?? $item->image,
+    
+                            'status' => $item->status,
+    
+                            'is_assigned' => !is_null($item->assigned_to),
+    
+                            'is_flagged' => (bool) $item->is_flagged,
+    
+                            'flag_reason' => $item->flag_reason,
+    
+                            /*
+                            |--------------------------------------------------------------------------
+                            | Uncomment Later If Required
+                            |--------------------------------------------------------------------------
+                            */
+    
+                            // 'item_id' => $item->id,
+    
+                            // 'product_id' => $item->product_id,
+    
+                            // 'assigned_to' => $item->assigned_to,
+    
+                            // 'assigned_user_name' => $item->assigned_user_name,
+    
+                            // 'picked_by' => $item->picked_by,
+    
+                            // 'picked_user_name' => $item->picked_user_name,
+    
+                            // 'picked_at' => $item->picked_at,
+    
+                            // 'packed_by' => $item->packed_by,
+    
+                            // 'packed_user_name' => $item->packed_user_name,
+    
+                            // 'packed_at' => $item->packed_at,
+    
+                            // 'delivered_by' => $item->delivered_by,
+    
+                            // 'delivered_user_name' => $item->delivered_user_name,
+    
+                            // 'delivered_at' => $item->delivered_at,
+    
+                            // 'is_packer_verified' => $item->is_packer_verified,
+    
+                            // 'packer_verified_by' => $item->packer_verified_by,
+    
+                            // 'packer_verified_user_name' => $item->packer_verified_user_name,
+    
+                            // 'packer_verified_at' => $item->packer_verified_at,
+                        ];
+                    })
+                    ->values(),
+            ];
+        });
+    
+        /*
+        |--------------------------------------------------------------------------
+        | Response
+        |--------------------------------------------------------------------------
+        */
+        return response()->json([
+            'success' => true,
+    
+            'data' => $orders->items(),
+    
+            'pagination' => [
+                'current_page' => $orders->currentPage(),
+                'per_page' => $orders->perPage(),
+                'total' => $orders->total(),
+                'last_page' => $orders->lastPage(),
+                'from' => $orders->firstItem(),
+                'to' => $orders->lastItem(),
+                'has_more_pages' => $orders->hasMorePages(),
+                'next_page_url' => $orders->nextPageUrl(),
+                'previous_page_url' => $orders->previousPageUrl(),
+            ],
+        ]);
     }
 
     public function deliveredCompleted(Request $request, $driver_user_id = null)
@@ -683,5 +967,53 @@ class OrderStatusApiController extends Controller
             'created_at' => $order->created_at ? $order->created_at->toIso8601String() : null,
             'updated_at' => $order->updated_at ? $order->updated_at->toIso8601String() : null,
         ];
+    }
+    public function orderDetails(Request $request, $order_id = null)
+    {
+        try {
+            $id = $order_id ?: $request->route('order_id') ?: $request->input('order_id') ?: $request->input('order');
+            if (!$id) {
+                return response()->json([
+                    'status' => false,
+                    'message' => 'Order not found',
+                ], 404);
+            }
+
+            $result = $this->orderDetailsService->getOrderDetails($id);
+
+            if (!$result['success'] || empty($result['data'])) {
+                return response()->json([
+                    'status' => false,
+                    'message' => 'Order not found',
+                ], 404);
+            }
+
+            return response()->json([
+                'status' => true,
+                'data' => $result['data'],
+                'message' => 'Order details',
+                'source' => $result['source'] ?? 'database',
+            ]);
+
+        } catch (\Throwable $e) {
+            \Log::error('Error in orderDetails: ' . $e->getMessage(), [
+                'order_id' => $order_id,
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+            ]);
+            return response()->json([
+                'status' => false,
+                'message' => 'Failed to fetch order details',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Helper method to format an Order model into unified Sales Order schema.
+     */
+    public function formatOrder(Order $order): array
+    {
+        return $this->orderDetailsService->buildMergedOrderData($order);
     }
 }

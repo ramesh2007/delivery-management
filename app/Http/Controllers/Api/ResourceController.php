@@ -5,15 +5,18 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Order;
 use App\Services\ShopifyService;
+use App\Services\OrderDetailsService;
 use Illuminate\Http\JsonResponse;
 
 class ResourceController extends Controller
 {
     protected ShopifyService $shopifyService;
+    protected OrderDetailsService $orderDetailsService;
 
-    public function __construct(ShopifyService $shopifyService)
+    public function __construct(ShopifyService $shopifyService, OrderDetailsService $orderDetailsService)
     {
         $this->shopifyService = $shopifyService;
+        $this->orderDetailsService = $orderDetailsService;
     }
 
     /**
@@ -355,305 +358,28 @@ class ResourceController extends Controller
 
     public function salesOrderDetail(string $orderId): JsonResponse
     {
+        $result = $this->orderDetailsService->getOrderDetails($orderId);
+
+        if ($result['success'] && !empty($result['data'])) {
+            return response()->json([
+                'status' => true,
+                'data' => $result['data'],
+                'source' => $result['source'] ?? 'shopify',
+            ]);
+        }
+
+        // Dynamic generic fallback for any arbitrary order identifier requested by front-end
         $orderId = trim(urldecode($orderId));
-        $numericId = ltrim($orderId, '#');
-
-        $candidateKeys = [
-            $orderId,
-            $numericId,
-            "#{$numericId}",
-            "SO-" . str_pad($numericId, 5, '0', STR_PAD_LEFT),
-            "SO-" . $numericId,
-        ];
-        $dbOrder = $this->findLocalOrder($candidateKeys);
-
-        // 1. Attempt to find order in Shopify live data if available
-        $ordersResult = $this->shopifyService->getOrders();
-        if (!empty($ordersResult['success']) && !empty($ordersResult['orders'])) {
-            foreach ($ordersResult['orders'] as $shopifyOrder) {
-                $sId = (string)($shopifyOrder['id'] ?? '');
-                $sName = (string)($shopifyOrder['name'] ?? '');
-                $sNum = (string)($shopifyOrder['order_number'] ?? '');
-
-                if (
-                    $orderId === $sId ||
-                    $orderId === $sName ||
-                    $orderId === "#{$sNum}" ||
-                    $numericId === $sNum ||
-                    $numericId === ltrim($sName, '#')
-                ) {
-                    $orderDbMatch = $dbOrder ?: $this->findLocalOrder($this->getCandidateKeysForShopifyOrder($shopifyOrder));
-                    return response()->json([
-                        'data' => $this->transformShopifyOrder($shopifyOrder, $orderDbMatch),
-                        'source' => 'shopify',
-                    ]);
-                }
-            }
-        }
-
-        // 2. Predefined mock orders repository
-        $mockOrders = [
-            '1002' => [
-                'name' => '#1002',
-                'customer' => 'CUST-9501213884660',
-                'customer_name' => 'Ansil A',
-                'contact_email' => 'ansil@gmail.com',
-                'contact_phone' => '+97432131234',
-                'transaction_date' => '2026-07-30 06:28:13',
-                'delivery_date' => '2026-07-31',
-                'grand_total' => 178.00,
-                'status' => 'Pending',
-                'custom_city' => 'Doha',
-                'custom_zone' => 'Zone A',
-                'custom_coordinator' => 'Unassigned',
-                'custom_driver' => 'Unassigned',
-                'custom_driver_status' => 'Pending',
-                'custom_picker' => 'Unassigned',
-                'custom_packer' => 'Unassigned',
-                'custom_channel' => 'Shopify draft order',
-                'custom_tat' => '2h 00m',
-                'custom_bags' => 3,
-                'custom_picking_status' => '0/3 Picked',
-                'custom_packing_status' => '0/3 Packed',
-                'custom_shopify_status' => 'Unfulfilled',
-                'custom_notes' => 'Handle with care. Call upon arrival.',
-                'custom_shipping_address_line1' => 'Building 12, Street 340',
-                'custom_shipping_address_line2' => 'Apartment 4B',
-                'custom_shipping_city' => 'Doha',
-                'custom_shipping_country' => 'Qatar',
-                'custom_latitude' => 25.276987,
-                'custom_longitude' => 51.520008,
-                'custom_tags' => 'Express, Fragile',
-                'line_items' => [
-                    [
-                        'id' => 14592039485,
-                        'name' => 'Chicco Next2Me Sleeping Crib - Silver',
-                        'sku' => 'CHK-CRIB-01',
-                        'custom_barcode' => '890123456789',
-                        'quantity' => 1,
-                        'price' => 120.00,
-                        'amount' => 120.00,
-                        'warehouse' => 'Fulfillment Center Hilal (F01)',
-                        'custom_bin' => 'BIN-A-12',
-                        'custom_status' => 'Pending',
-                        'image' => 'https://images.unsplash.com/photo-1519689680058-324335c77eba?w=150',
-                    ],
-                    [
-                        'id' => 14592039486,
-                        'name' => 'Baby Bottle Sterilizer & Dryer',
-                        'sku' => 'BB-STER-02',
-                        'custom_barcode' => '890987654321',
-                        'quantity' => 2,
-                        'price' => 29.00,
-                        'amount' => 58.00,
-                        'warehouse' => 'Fulfillment Center Hilal (F01)',
-                        'custom_bin' => 'BIN-B-05',
-                        'custom_status' => 'Pending',
-                        'image' => 'https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=150',
-                    ],
-                ],
-            ],
-            'SO-00001' => [
-                'name' => 'SO-00001',
-                'customer' => 'CUST-00001',
-                'customer_name' => 'Sara Al Sulaiti',
-                'contact_email' => 'sara@example.com',
-                'contact_phone' => '+974 5512 3456',
-                'transaction_date' => '2026-05-25 14:10:00',
-                'delivery_date' => '2026-05-26',
-                'grand_total' => 450.00,
-                'status' => 'Picking',
-                'custom_city' => 'Doha',
-                'custom_zone' => 'Zone A',
-                'custom_coordinator' => 'Ahmed Hassan',
-                'custom_driver' => 'Omar Farooq',
-                'custom_driver_status' => 'Assigned',
-                'custom_picker' => 'Ahmed Khalil',
-                'custom_packer' => 'Sara Al-Thani',
-                'custom_channel' => 'Web',
-                'custom_tat' => '2h 15m',
-                'custom_bags' => 2,
-                'custom_picking_status' => '1/2 Picked',
-                'custom_packing_status' => '0/2 Packed',
-                'custom_shopify_status' => 'Unfulfilled',
-                'custom_notes' => 'Please deliver before 5 PM.',
-                'custom_shipping_address_line1' => 'Villa 45, Al Waab Street',
-                'custom_shipping_address_line2' => 'Near Aspire Park',
-                'custom_shipping_city' => 'Doha',
-                'custom_shipping_country' => 'Qatar',
-                'custom_latitude' => 25.261987,
-                'custom_longitude' => 51.440008,
-                'custom_tags' => 'Express, Fragile',
-                'line_items' => [
-                    [
-                        'id' => 101,
-                        'name' => 'Chicco Next2Me Sleeping Crib - Silver',
-                        'sku' => 'CHK-CRIB-01',
-                        'custom_barcode' => '890123456789',
-                        'quantity' => 1,
-                        'price' => 350.00,
-                        'amount' => 350.00,
-                        'warehouse' => 'Fulfillment Center Hilal (F01)',
-                        'custom_bin' => 'BIN-A-12',
-                        'custom_status' => 'Picked',
-                        'image' => 'https://images.unsplash.com/photo-1519689680058-324335c77eba?w=150',
-                    ],
-                    [
-                        'id' => 102,
-                        'name' => 'Organic Baby Wipes 80s Pack',
-                        'sku' => 'OB-WIPES-03',
-                        'custom_barcode' => '890123456790',
-                        'quantity' => 4,
-                        'price' => 25.00,
-                        'amount' => 100.00,
-                        'warehouse' => 'Fulfillment Center Hilal (F01)',
-                        'custom_bin' => 'BIN-C-01',
-                        'custom_status' => 'Pending',
-                        'image' => 'https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=150',
-                    ],
-                ],
-            ],
-            'SO-00002' => [
-                'name' => 'SO-00002',
-                'customer' => 'CUST-00002',
-                'customer_name' => 'Mohamed Al Naimi',
-                'contact_email' => 'mohamed@example.com',
-                'contact_phone' => '+974 5566 7788',
-                'transaction_date' => '2026-05-26 09:35:00',
-                'delivery_date' => '2026-05-27',
-                'grand_total' => 380.50,
-                'status' => 'Packing',
-                'custom_city' => 'Doha',
-                'custom_zone' => 'Zone B',
-                'custom_coordinator' => 'Layla Al-Mannai',
-                'custom_driver' => 'Faisal Al-Kuwari',
-                'custom_driver_status' => 'Assigned',
-                'custom_picker' => 'Noora Hassan',
-                'custom_packer' => 'Salem Abdulla',
-                'custom_channel' => 'Mobile',
-                'custom_tat' => '1h 50m',
-                'custom_bags' => 1,
-                'custom_picking_status' => '1/1 Picked',
-                'custom_packing_status' => '0/1 Packed',
-                'custom_shopify_status' => 'Unfulfilled',
-                'custom_notes' => 'Ring door bell twice.',
-                'custom_shipping_address_line1' => 'Tower 3, Apt 1402, Pearl Qatar',
-                'custom_shipping_address_line2' => 'Porto Arabia',
-                'custom_shipping_city' => 'Doha',
-                'custom_shipping_country' => 'Qatar',
-                'custom_latitude' => 25.371987,
-                'custom_longitude' => 51.550008,
-                'custom_tags' => 'Standard',
-                'line_items' => [
-                    [
-                        'id' => 201,
-                        'name' => 'Ergonomic Baby Carrier - Midnight Blue',
-                        'sku' => 'EBC-001',
-                        'custom_barcode' => '890987654111',
-                        'quantity' => 1,
-                        'price' => 280.50,
-                        'amount' => 280.50,
-                        'warehouse' => 'Fulfillment Center Hilal (F01)',
-                        'custom_bin' => 'BIN-A-04',
-                        'custom_status' => 'Picked',
-                        'image' => 'https://images.unsplash.com/photo-1519689680058-324335c77eba?w=150',
-                    ],
-                    [
-                        'id' => 202,
-                        'name' => 'Silicone Feeding Bib Set (2-Pack)',
-                        'sku' => 'SFBS-02',
-                        'custom_barcode' => '890987654222',
-                        'quantity' => 2,
-                        'price' => 50.00,
-                        'amount' => 100.00,
-                        'warehouse' => 'Fulfillment Center Hilal (F01)',
-                        'custom_bin' => 'BIN-B-02',
-                        'custom_status' => 'Picked',
-                        'image' => 'https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=150',
-                    ],
-                ],
-            ],
-            'SO-00003' => [
-                'name' => 'SO-00003',
-                'customer' => 'CUST-00003',
-                'customer_name' => 'Fatima Al-Kuwari',
-                'contact_email' => 'fatima@example.com',
-                'contact_phone' => '+974 5599 1122',
-                'transaction_date' => '2026-05-26 11:20:00',
-                'delivery_date' => '2026-05-27',
-                'grand_total' => 520.75,
-                'status' => 'Pending',
-                'custom_city' => 'Al Rayyan',
-                'custom_zone' => 'Zone C',
-                'custom_coordinator' => 'Issa Al Thani',
-                'custom_driver' => 'Hassan Al-Saadi',
-                'custom_driver_status' => 'Pending',
-                'custom_picker' => 'Reem Al Ansari',
-                'custom_packer' => 'Maha Al Kuwari',
-                'custom_channel' => 'Store',
-                'custom_tat' => '3h 05m',
-                'custom_bags' => 3,
-                'custom_picking_status' => '0/3 Picked',
-                'custom_packing_status' => '0/3 Packed',
-                'custom_shopify_status' => 'Unfulfilled',
-                'custom_notes' => 'Fragile item, handle with care.',
-                'custom_shipping_address_line1' => 'Building 8, Street 910',
-                'custom_shipping_address_line2' => 'Al Rayyan Compound',
-                'custom_shipping_city' => 'Al Rayyan',
-                'custom_shipping_country' => 'Qatar',
-                'custom_latitude' => 25.291987,
-                'custom_longitude' => 51.420008,
-                'custom_tags' => 'High Value, Fragile',
-                'line_items' => [
-                    [
-                        'id' => 301,
-                        'name' => 'Convertible Baby High Chair',
-                        'sku' => 'CHC-99',
-                        'custom_barcode' => '890987654333',
-                        'quantity' => 1,
-                        'price' => 450.00,
-                        'amount' => 450.00,
-                        'warehouse' => 'Fulfillment Center Hilal (F01)',
-                        'custom_bin' => 'BIN-D-01',
-                        'custom_status' => 'Pending',
-                        'image' => 'https://images.unsplash.com/photo-1519689680058-324335c77eba?w=150',
-                    ],
-                    [
-                        'id' => 302,
-                        'name' => 'Soft Plush Teether Toy',
-                        'sku' => 'SPTT-05',
-                        'custom_barcode' => '890987654444',
-                        'quantity' => 2,
-                        'price' => 35.375,
-                        'amount' => 70.75,
-                        'warehouse' => 'Fulfillment Center Hilal (F01)',
-                        'custom_bin' => 'BIN-A-01',
-                        'custom_status' => 'Pending',
-                        'image' => 'https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=150',
-                    ],
-                ],
-            ],
-        ];
-
-        // Check exact or key alias match in mock data
-        $lookupKeys = [$orderId, $numericId, "#{$numericId}", "SO-" . str_pad($numericId, 5, '0', STR_PAD_LEFT)];
-        foreach ($lookupKeys as $key) {
-            if (isset($mockOrders[$key])) {
-                $mockData = $mockOrders[$key];
-                if ($dbOrder) {
-                    $mockData = $this->enrichOrderDataWithLocalDb($mockData, $dbOrder);
-                }
-                return response()->json([
-                    'data' => $mockData,
-                    'source' => 'mock',
-                ]);
-            }
-        }
-
-        // 3. Dynamic generic fallback for any arbitrary order identifier requested by front-end
         $formattedName = str_starts_with($orderId, 'SO-') || str_starts_with($orderId, '#')
             ? $orderId
             : '#' . $orderId;
+
+        $candidateKeys = [
+            $orderId,
+            ltrim($orderId, '#'),
+            "#{$orderId}",
+        ];
+        $dbOrder = $this->findLocalOrder($candidateKeys);
 
         $genericData = [
             'order_number' => $formattedName,
@@ -739,6 +465,7 @@ class ResourceController extends Controller
         }
 
         return response()->json([
+            'status' => true,
             'data' => $genericData,
             'source' => 'fallback',
         ]);

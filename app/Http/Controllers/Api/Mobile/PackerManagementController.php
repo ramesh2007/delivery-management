@@ -30,96 +30,282 @@ class PackerManagementController extends Controller
      * Route: GET /api/orders/packer/picked/{user_id?}
      * Route: GET /api/orders-picked/{id?}
      */
+
+    // public function getPickedOrdersForPacker(Request $request, $userId = null)
+    // {
+    //     $packerId = $userId ? trim((string) $userId) : null;
+    //     if (!$packerId) {
+    //         $packerId = $request->query('user_id') ?? $request->query('packer_id') ?? $request->query('id');
+    //         if ($packerId) {
+    //             $packerId = trim((string) $packerId);
+    //         }
+    //     }
+
+    //     // Auto-sync orders from Shopify silently
+    //     if ($request->boolean('auto_sync', true)) {
+    //         try {
+    //             $this->shopifyService->syncOrdersToDatabase();
+    //         } catch (\Exception $e) {
+    //             // Ignore sync error if offline
+    //         }
+    //     }
+
+    //     $query = Order::with([
+    //         'items.assignedUser',
+    //         'items.pickedUser',
+    //         'items.packedUser',
+    //         'items.deliveredUser',
+    //         'items.packerVerifiedUser',
+    //         'assignedUser',
+    //         'pickedUser',
+    //         'packedUser',
+    //         'deliveredUser',
+    //         'packerAssignment',
+    //         'logs.user'
+    //     ]);
+
+    //     // Condition 1: Order overall status is 'picked'
+    //     $query->where('status', 'picked');
+
+    //     // Condition 2: Ensure all items in order_items table are picked
+    //     $query->whereDoesntHave('items', function ($iq) {
+    //         $iq->where('status', 'pending');
+    //     });
+
+    //     // Optional filter by assigned packer ID if passed
+    //     if (!empty($packerId)) {
+    //         $query->where(function ($q) use ($packerId) {
+    //             $q->where('packed_by', $packerId)
+    //               ->orWhere('packed_user_name', $packerId)
+    //               ->orWhereHas('packerAssignment', function ($pa) use ($packerId) {
+    //                   $pa->where('packer_assigned_user_id', $packerId)
+    //                     ->orWhere('packer_assigned_user_name', $packerId);
+    //               });
+    //         });
+    //     } elseif ($request->boolean('unassigned')) {
+    //         // Unassigned orders to any packer
+    //         $query->whereNull('packed_by')
+    //               ->whereDoesntHave('packerAssignment');
+    //     }
+
+    //     // Search filter
+    //     if ($request->filled('search')) {
+    //         $search = $request->query('search');
+    //         $query->where(function ($q) use ($search) {
+    //             $q->where('order_number', 'like', "%{$search}%")
+    //               ->orWhere('customer_name', 'like', "%{$search}%")
+    //               ->orWhere('customer_phone', 'like', "%{$search}%")
+    //               ->orWhere('assigned_user_name', 'like', "%{$search}%")
+    //               ->orWhere('packed_user_name', 'like', "%{$search}%");
+    //         });
+    //     }
+
+    //     $orders = $query->orderBy('updated_at', 'desc')
+    //                     ->orderBy('created_at', 'desc')
+    //                     ->get();
+
+    //     // Format orders for mobile API
+    //     $formattedOrders = $orders->map(function ($order) {
+    //         // Additional check: Ensure order has items and no item is unpicked
+    //         $hasUnpicked = $order->items->contains(fn($item) => $item->status === 'pending' || is_null($item->picked_by));
+    //         if ($hasUnpicked) {
+    //             return null;
+    //         }
+    //         return $this->formatOrderDetails($order, 'picked');
+    //     })
+    //     ->filter()
+    //     ->values();
+
+    //     return response()->json([
+    //         'success' => true,
+    //         'message' => 'Picked orders ready for packing retrieved successfully.',
+    //         'count' => $formattedOrders->count(),
+    //         'data' => $formattedOrders,
+    //     ]);
+    // }
+    
     public function getPickedOrdersForPacker(Request $request, $userId = null)
     {
         $packerId = $userId ? trim((string) $userId) : null;
+    
         if (!$packerId) {
-            $packerId = $request->query('user_id') ?? $request->query('packer_id') ?? $request->query('id');
+            $packerId = $request->query('user_id')
+                ?? $request->query('packer_id')
+                ?? $request->query('id');
+    
             if ($packerId) {
                 $packerId = trim((string) $packerId);
             }
         }
-
-        // Auto-sync orders from Shopify silently
-        if ($request->boolean('auto_sync', true)) {
-            try {
-                $this->shopifyService->syncOrdersToDatabase();
-            } catch (\Exception $e) {
-                // Ignore sync error if offline
-            }
-        }
-
-        $query = Order::with([
-            'items.assignedUser',
-            'items.pickedUser',
-            'items.packedUser',
-            'items.deliveredUser',
-            'items.packerVerifiedUser',
-            'assignedUser',
-            'pickedUser',
-            'packedUser',
-            'deliveredUser',
-            'packerAssignment',
-            'logs.user'
-        ]);
-
-        // Condition 1: Order overall status is 'picked'
+    
+        // Local database only - no Shopify sync
+        $query = Order::query()
+            ->with([
+                'items',
+                'items.assignedUser',
+                'items.pickedUser',
+                'items.packedUser',
+                'items.deliveredUser',
+                'items.packerVerifiedUser',
+                'assignedUser',
+                'pickedUser',
+                'packedUser',
+                'deliveredUser',
+                'packerAssignment',
+                'logs.user',
+            ]);
+    
+        /*
+         * Condition 1:
+         * Order status must be picked
+         */
         $query->where('status', 'picked');
-
-        // Condition 2: Ensure all items in order_items table are picked
-        $query->whereDoesntHave('items', function ($iq) {
-            $iq->where('status', 'pending');
+    
+        /*
+         * Condition 2:
+         * Order must have at least one item which is
+         * NOT yet packer verified.
+         *
+         * This allows:
+         *   is_packer_verified = 0
+         *   is_packer_verified = NULL
+         *
+         * and excludes orders where ALL items are verified.
+         */
+        $query->whereHas('items', function ($q) {
+            $q->where(function ($itemQuery) {
+                $itemQuery->where('is_packer_verified', false)
+                    ->orWhereNull('is_packer_verified');
+            });
         });
-
-        // Filter by assigned packer ID if passed; otherwise default to unassigned ready-to-pack orders
+    
+        /*
+         * Optional packer filter
+         */
         if (!empty($packerId)) {
             $query->where(function ($q) use ($packerId) {
                 $q->where('packed_by', $packerId)
-                  ->orWhere('packed_user_name', $packerId)
-                  ->orWhereHas('packerAssignment', function ($pa) use ($packerId) {
-                      $pa->where('packer_assigned_user_id', $packerId)
-                        ->orWhere('packer_assigned_user_name', $packerId);
-                  });
+                    ->orWhere('packed_user_name', $packerId)
+                    ->orWhereHas('packerAssignment', function ($pa) use ($packerId) {
+                        $pa->where('packer_assigned_user_id', $packerId)
+                            ->orWhere('packer_assigned_user_name', $packerId);
+                    });
             });
-        } else {
-            // Default: Exclude any order that is already assigned to a packer in orders table or orders_packer_assigned table
+        } elseif ($request->boolean('unassigned')) {
+            /*
+             * Only show orders not assigned to any packer
+             */
             $query->whereNull('packed_by')
-                  ->whereDoesntHave('packerAssignment');
+                ->whereDoesntHave('packerAssignment');
         }
-
-        // Search filter
+    
+        /*
+         * Search
+         */
         if ($request->filled('search')) {
-            $search = $request->query('search');
+            $search = trim($request->query('search'));
+    
             $query->where(function ($q) use ($search) {
                 $q->where('order_number', 'like', "%{$search}%")
-                  ->orWhere('customer_name', 'like', "%{$search}%")
-                  ->orWhere('customer_phone', 'like', "%{$search}%")
-                  ->orWhere('assigned_user_name', 'like', "%{$search}%")
-                  ->orWhere('packed_user_name', 'like', "%{$search}%");
+                    ->orWhere('customer_name', 'like', "%{$search}%")
+                    ->orWhere('customer_phone', 'like', "%{$search}%")
+                    ->orWhere('email', 'like', "%{$search}%")
+                    ->orWhere('assigned_user_name', 'like', "%{$search}%")
+                    ->orWhere('packed_user_name', 'like', "%{$search}%");
             });
         }
-
-        $orders = $query->orderBy('updated_at', 'desc')
-                        ->orderBy('created_at', 'desc')
-                        ->get();
-
-        // Format orders for mobile API
-        $formattedOrders = $orders->map(function ($order) {
-            // Additional check: Ensure order has items and no item is unpicked
-            $hasUnpicked = $order->items->contains(fn($item) => $item->status === 'pending' || is_null($item->picked_by));
-            if ($hasUnpicked) {
-                return null;
-            }
-            return $this->formatOrderDetails($order, 'picked');
-        })
-        ->filter()
-        ->values();
-
+    
+        /*
+         * Pagination
+         */
+        $orders = $query
+            ->orderBy('updated_at', 'desc')
+            ->orderBy('created_at', 'desc')
+            ->paginate(15);
+    
+        /*
+         * Format response
+         */
+        $orders->getCollection()->transform(function ($order) {
+    
+            return [
+                'order_number' => $order->order_number,
+    
+                'created_at' => $order->created_at
+                    ? $order->created_at->toIso8601String()
+                    : null,
+    
+                'status' => $order->status,
+                'financial_status' => $order->financial_status,
+                'total_price' => $order->total_price,
+                'currency' => $order->currency,
+    
+                'customer_name' => $order->customer_name,
+                'email' => $order->email,
+                'phone' => $order->customer_phone ?? $order->phone,
+    
+                'bag_count' => $order->bag_count,
+                'shipping_address' => $order->shipping_address,
+    
+                'items' => $order->items->map(function ($item) {
+                    return [
+                        'line_item_id' => $item->line_item_id,
+                        'product_name' => $item->product_name,
+    
+                        'sku' => $item->sku ?? $item->product_code,
+                        'barcode' => $item->barcode,
+    
+                        'quantity' => (int) $item->quantity,
+                        'unit_price' => $item->unit_price,
+                        'vendor' => $item->vendor,
+    
+                        'rack' => $item->rack,
+                        'bin' => $item->bin,
+    
+                        'imageUrl' => $item->imageUrl
+                            ?? $item->image_url
+                            ?? $item->image,
+    
+                        'status' => $item->status,
+    
+                        'is_assigned' => !is_null($item->assigned_to),
+    
+                        'is_flagged' => (bool) $item->is_flagged,
+                        'flag_reason' => $item->flag_reason,
+    
+                        'packed_by' => $item->packed_by,
+                        'packed_user_name' => $item->packed_user_name,
+                        'packed_at' => $item->packed_at,
+    
+                        'picked_by' => $item->picked_by,
+                        'picked_user_name' => $item->picked_user_name,
+                        'picked_at' => $item->picked_at,
+    
+                        'is_packer_verified' => (bool) $item->is_packer_verified,
+                        'packer_verified_by' => $item->packer_verified_by,
+                        'packer_verified_user_name' => $item->packer_verified_user_name,
+                        'packer_verified_at' => $item->packer_verified_at,
+                    ];
+                })->values(),
+            ];
+        });
+    
         return response()->json([
             'success' => true,
-            'message' => 'Picked orders ready for packing retrieved successfully.',
-            'count' => $formattedOrders->count(),
-            'data' => $formattedOrders,
+            'message' => 'Picked orders pending packer verification retrieved successfully.',
+            'data' => $orders->items(),
+    
+            'pagination' => [
+                'current_page' => $orders->currentPage(),
+                'per_page' => $orders->perPage(),
+                'total' => $orders->total(),
+                'last_page' => $orders->lastPage(),
+                'from' => $orders->firstItem(),
+                'to' => $orders->lastItem(),
+                'has_more_pages' => $orders->hasMorePages(),
+                'next_page_url' => $orders->nextPageUrl(),
+                'previous_page_url' => $orders->previousPageUrl(),
+            ],
         ]);
     }
 
@@ -250,81 +436,656 @@ class PackerManagementController extends Controller
             'data' => $formattedOrders,
         ]);
     }
+    //  public function apiPackerOrdersById(Request $request, $id)
+    // {
+    //     $idStr = trim((string) $id);
+
+    //     // Auto-sync orders from Shopify silently
+    //     if ($request->boolean('auto_sync', true)) {
+    //         try {
+    //             $this->shopifyService->syncOrdersToDatabase();
+    //         } catch (\Exception $e) {
+    //             // Ignore sync error if offline
+    //         }
+    //     }
+
+    //     $orders = Order::with([
+    //         'items.assignedUser',
+    //         'items.pickedUser',
+    //         'items.packedUser',
+    //         'items.deliveredUser',
+    //         'items.packerVerifiedUser',
+    //         'assignedUser',
+    //         'pickedUser',
+    //         'packedUser',
+    //         'deliveredUser',
+    //         'packerAssignment',
+    //         'logs.user',
+    //     ])
+    //     ->where('status', 'picked')
+    //     ->where(function ($q) use ($idStr) {
+    //         $q->where('packed_by', $idStr)
+    //           ->orWhere('packed_user_name', $idStr)
+    //           ->orWhereHas('packerAssignment', function ($pa) use ($idStr) {
+    //               $pa->where('packer_assigned_user_id', $idStr)
+    //                 ->orWhere('packer_assigned_user_name', $idStr);
+    //           });
+    //     })
+    //     ->orderBy('updated_at', 'desc')
+    //     ->get();
+
+    //     $formattedOrders = $orders->map(fn($order) => $this->formatOrderDetails($order, 'picked'))
+    //         ->filter(fn($ord) => count($ord['items']) > 0 || $ord['status'] === 'picked')
+    //         ->values();
+
+    //     return response()->json([
+    //         'success' => true,
+    //         'data' => $formattedOrders,
+    //     ]);
+    // }
 
     /**
      * Get completed packed orders for a specific packer user ID (status = 'packed' or 'delivered')
      * Route: GET /api/orders/packed-completed/{id?}
      * Route: GET /api/orders/packer/complete/{id?}
      */
-    public function apiPackerOrdersComplete(Request $request, $id = null)
+    // public function apiPackerOrdersComplete(Request $request, $id = null)
+    // {
+    //     $idStr = $id ? trim((string) $id) : null;
+    //     if (!$idStr) {
+    //         $idStr = $request->query('user_id') ?? $request->query('packer_id') ?? $request->query('id');
+    //         if ($idStr) {
+    //             $idStr = trim((string) $idStr);
+    //         }
+    //     }
+
+    //     // Auto-sync orders from Shopify silently
+    //     if ($request->boolean('auto_sync', true)) {
+    //         try {
+    //             $this->shopifyService->syncOrdersToDatabase();
+    //         } catch (\Exception $e) {
+    //             // Ignore sync error if offline
+    //         }
+    //     }
+
+    //     $query = Order::with([
+    //         'items.assignedUser',
+    //         'items.pickedUser',
+    //         'items.packedUser',
+    //         'items.deliveredUser',
+    //         'items.packerVerifiedUser',
+    //         'assignedUser',
+    //         'pickedUser',
+    //         'packedUser',
+    //         'deliveredUser',
+    //         'packerAssignment',
+    //         'logs.user'
+    //     ])
+    //     ->whereIn('status', ['packed', 'delivered']);
+
+    //     if (!empty($idStr)) {
+    //         $query->where(function ($q) use ($idStr) {
+    //             $q->where('packed_by', $idStr)
+    //               ->orWhere('packed_user_name', $idStr)
+    //               ->orWhereHas('packerAssignment', function ($pa) use ($idStr) {
+    //                   $pa->where('packer_assigned_user_id', $idStr)
+    //                     ->orWhere('packer_assigned_user_name', $idStr);
+    //               })
+    //               ->orWhereHas('items', function ($iq) use ($idStr) {
+    //                   $iq->where('packed_by', $idStr)
+    //                     ->orWhere('packer_verified_by', $idStr);
+    //               });
+    //         });
+    //     }
+
+    //     $orders = $query->orderBy('packed_at', 'desc')
+    //                     ->orderBy('updated_at', 'desc')
+    //                     ->get();
+
+    //     $formattedOrders = $orders->map(fn($order) => $this->formatOrderDetails($order, 'packed'))
+    //         ->filter(fn($ord) => count($ord['items']) > 0 || $ord['status'] === 'ready_to_assign')
+    //         ->values();
+
+    //     return response()->json([
+    //         'success' => true,
+    //         'data' => $formattedOrders,
+    //     ]);
+    // }
+    
+    //     public function apiPackerOrdersComplete(Request $request, $id = null)
+    // {
+    //     $idStr = $id ? trim((string) $id) : null;
+    
+    //     if (!$idStr) {
+    //         $idStr = $request->query('user_id')
+    //             ?? $request->query('packer_id')
+    //             ?? $request->query('id');
+    
+    //         if ($idStr) {
+    //             $idStr = trim((string) $idStr);
+    //         }
+    //     }
+    
+    //     // Auto-sync orders from Shopify silently
+    //     if ($request->boolean('auto_sync', true)) {
+    //         try {
+    //             $this->shopifyService->syncOrdersToDatabase();
+    //         } catch (\Exception $e) {
+    //             // Ignore sync error if offline
+    //         }
+    //     }
+    
+    //     $query = Order::with([
+    //         'items',
+    
+    //         // Uncomment if needed later
+    //         // 'items.assignedUser',
+    //         // 'items.pickedUser',
+    //         // 'items.packedUser',
+    //         // 'items.deliveredUser',
+    //         // 'items.packerVerifiedUser',
+    //         // 'assignedUser',
+    //         // 'pickedUser',
+    //         // 'packedUser',
+    //         // 'deliveredUser',
+    //         // 'packerAssignment',
+    //         // 'logs.user',
+    //     ])
+    //     ->whereIn('status', ['packed', 'delivered']);
+    
+    //     // Filter by packer
+    //     if (!empty($idStr)) {
+    //         $query->where(function ($q) use ($idStr) {
+    //             $q->where('packed_by', $idStr)
+    //               ->orWhere('packed_user_name', $idStr)
+    
+    //               ->orWhereHas('packerAssignment', function ($pa) use ($idStr) {
+    //                   $pa->where('packer_assigned_user_id', $idStr)
+    //                      ->orWhere('packer_assigned_user_name', $idStr);
+    //               })
+    
+    //               ->orWhereHas('items', function ($iq) use ($idStr) {
+    //                   $iq->where('packed_by', $idStr)
+    //                      ->orWhere('packer_verified_by', $idStr);
+    //               });
+    //         });
+    //     }
+    
+    //     // 15 orders per page
+    //     $orders = $query
+    //         ->orderBy('packed_at', 'desc')
+    //         ->orderBy('updated_at', 'desc')
+    //         ->paginate(15);
+    
+    //     /*
+    //     |--------------------------------------------------------------------------
+    //     | Format response directly
+    //     |--------------------------------------------------------------------------
+    //     */
+    
+    //     $formattedOrders = $orders->getCollection()
+    //         ->map(function ($order) {
+    
+    //             return [
+    //                 'order_number' => $order->order_number,
+    
+    //                 'created_at' => $order->created_at,
+    
+    //                 'status' => $order->status,
+    
+    //                 'financial_status' => $order->financial_status ?? null,
+    
+    //                 'total_price' => $order->total_price
+    //                     ?? $order->total_amount
+    //                     ?? null,
+    
+    //                 'currency' => $order->currency ?? 'QAR',
+    
+    //                 'customer_name' => $order->customer_name,
+    
+    //                 'email' => $order->email
+    //                     ?? $order->customer_email
+    //                     ?? null,
+    
+    //                 'phone' => $order->customer_phone
+    //                     ?? $order->phone
+    //                     ?? null,
+    
+    //                 'bag_count' => $order->bag_count,
+    
+    //                 'shipping_address' => $order->shipping_address
+    //                     ?? $order->delivery_address
+    //                     ?? null,
+    
+    //                 'items' => $order->items->map(function ($item) {
+    
+    //                     return [
+    //                         'line_item_id' => $item->line_item_id,
+    
+    //                         'product_name' => $item->product_name,
+    
+    //                         'sku' => $item->sku
+    //                             ?? $item->product_code
+    //                             ?? null,
+    
+    //                         'barcode' => $item->barcode,
+    
+    //                         'quantity' => $item->quantity,
+    
+    //                         'unit_price' => $item->unit_price,
+    
+    //                         'vendor' => $item->vendor ?? null,
+    
+    //                         'rack' => $item->rack ?? null,
+    
+    //                         'bin' => $item->bin ?? null,
+    
+    //                         'imageUrl' => $item->imageUrl
+    //                             ?? $item->image_url
+    //                             ?? $item->image
+    //                             ?? null,
+    
+    //                         'status' => $item->status,
+    
+    //                         'is_assigned' => !empty($item->assigned_to)
+    //                             || !empty($item->assigned_by)
+    //                             || !empty($item->assigned_user_id),
+    
+    //                         'is_flagged' => (bool) ($item->is_flagged ?? false),
+    
+    //                         'flag_reason' => $item->flag_reason ?? null,
+    
+    //                         // Other fields - uncomment when required
+    //                         // 'item_id' => $item->id,
+    //                         // 'total_price' => $item->total_price,
+    //                         // 'picked_by' => $item->picked_by,
+    //                         // 'packed_by' => $item->packed_by,
+    //                         // 'packer_verified_by' => $item->packer_verified_by,
+    //                         // 'assigned_user' => $item->assignedUser,
+    //                         // 'picked_user' => $item->pickedUser,
+    //                         // 'packed_user' => $item->packedUser,
+    //                         // 'delivered_user' => $item->deliveredUser,
+    //                         // 'created_at' => $item->created_at,
+    //                         // 'updated_at' => $item->updated_at,
+    //                     ];
+    //                 })->values(),
+    
+    //                 // Other order fields - uncomment when required
+    //                 // 'order_id' => $order->id,
+    //                 // 'assigned_user' => $order->assignedUser,
+    //                 // 'picked_user' => $order->pickedUser,
+    //                 // 'packed_user' => $order->packedUser,
+    //                 // 'delivered_user' => $order->deliveredUser,
+    //                 // 'packer_assignment' => $order->packerAssignment,
+    //                 // 'logs' => $order->logs,
+    //             ];
+    //         })
+    //         ->values();
+    
+    //     // Replace paginator collection with formatted data
+    //     $orders->setCollection($formattedOrders);
+    
+    //     return response()->json([
+    //         'success' => true,
+    //         'message' => 'Packer completed orders retrieved successfully.',
+    //         'data' => $orders->items(),
+    
+    //         // Pagination
+    //         'pagination' => [
+    //             'current_page' => $orders->currentPage(),
+    //             'per_page' => $orders->perPage(),
+    //             'total' => $orders->total(),
+    //             'last_page' => $orders->lastPage(),
+    //             'from' => $orders->firstItem(),
+    //             'to' => $orders->lastItem(),
+    //             'has_more_pages' => $orders->hasMorePages(),
+    //         ],
+    //     ]);
+    // }
+      public function apiPackerOrdersComplete(Request $request, $id = null)
     {
-        $idStr = $id ? trim((string) $id) : null;
-        if (!$idStr) {
-            $idStr = $request->query('user_id') ?? $request->query('packer_id') ?? $request->query('id');
-            if ($idStr) {
-                $idStr = trim((string) $idStr);
-            }
-        }
-
-        // Auto-sync orders from Shopify silently
-        if ($request->boolean('auto_sync', true)) {
-            try {
-                $this->shopifyService->syncOrdersToDatabase();
-            } catch (\Exception $e) {
-                // Ignore sync error if offline
-            }
-        }
-
-        $query = Order::with([
-            'items.assignedUser',
-            'items.pickedUser',
-            'items.packedUser',
-            'items.deliveredUser',
-            'items.packerVerifiedUser',
-            'assignedUser',
-            'pickedUser',
-            'packedUser',
-            'deliveredUser',
-            'packerAssignment',
-            'logs.user'
-        ])
-        ->whereIn('status', ['packed', 'delivered']);
-
-        if (!empty($idStr)) {
-            $query->where(function ($q) use ($idStr) {
-                $q->where('packed_by', $idStr)
-                  ->orWhere('packed_user_name', $idStr)
-                  ->orWhereHas('packerAssignment', function ($pa) use ($idStr) {
-                      $pa->where('packer_assigned_user_id', $idStr)
-                        ->orWhere('packer_assigned_user_name', $idStr);
-                  })
-                  ->orWhereHas('items', function ($iq) use ($idStr) {
-                      $iq->where('packed_by', $idStr)
-                        ->orWhere('packer_verified_by', $idStr);
-                  });
+        /*
+        |--------------------------------------------------------------------------
+        | Get Packer ID
+        |--------------------------------------------------------------------------
+        */
+        $packerId = $id
+            ?? $request->input('user_id')
+            ?? $request->input('packer_id')
+            ?? $request->input('id');
+    
+        /*
+        |--------------------------------------------------------------------------
+        | Base Query
+        |--------------------------------------------------------------------------
+        | Directly use orders + order_items tables.
+        | No Shopify sync here because it makes the API slow.
+        |--------------------------------------------------------------------------
+        */
+        $query = Order::query()
+            ->with([
+                'items',
+                // 'items.vendor',
+                // 'items.product',
+                // 'items.rack',
+                // 'items.bin',
+            ])
+            ->whereIn('status', ['packed']);
+    
+        /*
+        |--------------------------------------------------------------------------
+        | Packer Filter
+        |--------------------------------------------------------------------------
+        */
+        if (!empty($packerId)) {
+    
+            $packerId = (string) $packerId;
+    
+            $query->where(function ($q) use ($packerId) {
+    
+                /*
+                | Order level packed information
+                */
+                $q->where('packed_by', $packerId)
+                    ->orWhere('packed_user_name', $packerId)
+    
+                    /*
+                    | Packer assignment table
+                    */
+                    ->orWhereHas('packerAssignment', function ($pa) use ($packerId) {
+                        $pa->where('packer_assigned_user_id', $packerId)
+                            ->orWhere('packer_assigned_user_name', $packerId);
+                    })
+    
+                    /*
+                    | Order item level packed information
+                    */
+                    ->orWhereHas('items', function ($iq) use ($packerId) {
+                        $iq->where('packed_by', $packerId)
+                            ->orWhere('packer_verified_by', $packerId);
+                    });
             });
         }
-
-        $orders = $query->orderBy('packed_at', 'desc')
-                        ->orderBy('updated_at', 'desc')
-                        ->get();
-
-        $formattedOrders = $orders->map(fn($order) => $this->formatOrderDetails($order, 'packed'))
-            ->filter(fn($ord) => count($ord['items']) > 0 || $ord['status'] === 'packed')
-            ->values();
-
+    
+        /*
+        |--------------------------------------------------------------------------
+        | Only orders having packed/delivered items
+        |--------------------------------------------------------------------------
+        */
+        $query->whereHas('items', function ($q) {
+            $q->whereIn('status', ['packed', 'delivered']);
+        });
+    
+        /*
+        |--------------------------------------------------------------------------
+        | Pagination
+        |--------------------------------------------------------------------------
+        | Always 15 orders per page
+        |--------------------------------------------------------------------------
+        */
+        $orders = $query
+            ->orderBy('created_at', 'desc')
+            ->paginate(15);
+    
+        /*
+        |--------------------------------------------------------------------------
+        | Format Orders
+        |--------------------------------------------------------------------------
+        */
+        $orders->getCollection()->transform(function ($order) {
+    
+            return [
+    
+                /*
+                |--------------------------------------------------------------------------
+                | Order Details
+                |--------------------------------------------------------------------------
+                */
+                'order_number' => $order->order_number,
+    
+                'created_at' => $order->created_at
+                    ? $order->created_at->toIso8601String()
+                    : null,
+    
+                'status' => $order->status,
+    
+                'financial_status' => $order->financial_status,
+    
+                'total_price' => $order->total_price,
+    
+                'currency' => $order->currency,
+    
+                'customer_name' => $order->customer_name,
+    
+                'email' => $order->email,
+    
+                'phone' => $order->customer_phone ?? $order->phone,
+    
+                'bag_count' => $order->bag_count,
+    
+                /*
+                |--------------------------------------------------------------------------
+                | Shipping address
+                |--------------------------------------------------------------------------
+                | Keep commented if not required by packer screen.
+                |--------------------------------------------------------------------------
+                */
+    
+                // 'shipping_address' => $order->shipping_address,
+    
+                /*
+                |--------------------------------------------------------------------------
+                | Order Items
+                |--------------------------------------------------------------------------
+                */
+    
+                'items' => $order->items
+                    ->filter(function ($item) {
+                        return in_array($item->status, ['packed', 'delivered']);
+                    })
+                    ->map(function ($item) {
+    
+                        return [
+    
+                            'line_item_id' => $item->line_item_id,
+    
+                            'product_name' => $item->product_name,
+    
+                            'sku' => $item->sku ?? $item->product_code,
+    
+                            'barcode' => $item->barcode,
+    
+                            'quantity' => (int) $item->quantity,
+    
+                            'unit_price' => $item->unit_price,
+    
+                            'vendor' => $item->vendor,
+    
+                            'rack' => $item->rack,
+    
+                            'bin' => $item->bin,
+    
+                            'imageUrl' => $item->imageUrl
+                                ?? $item->image_url
+                                ?? $item->image,
+    
+                            'status' => $item->status,
+    
+                            'is_assigned' => !is_null($item->assigned_to),
+    
+                            'is_flagged' => (bool) $item->is_flagged,
+    
+                            'flag_reason' => $item->flag_reason,
+    
+                            /*
+                            |--------------------------------------------------------------------------
+                            | Uncomment when required later
+                            |--------------------------------------------------------------------------
+                            */
+    
+                            // 'item_id' => $item->id,
+    
+                            // 'product_id' => $item->product_id,
+    
+                            // 'assigned_to' => $item->assigned_to,
+    
+                            // 'assigned_user_name' => $item->assigned_user_name,
+    
+                            // 'picked_by' => $item->picked_by,
+    
+                            // 'picked_user_name' => $item->picked_user_name,
+    
+                            // 'picked_at' => $item->picked_at,
+    
+                            // 'packed_by' => $item->packed_by,
+    
+                            // 'packed_user_name' => $item->packed_user_name,
+    
+                            // 'packed_at' => $item->packed_at,
+    
+                            // 'delivered_by' => $item->delivered_by,
+    
+                            // 'delivered_user_name' => $item->delivered_user_name,
+    
+                            // 'delivered_at' => $item->delivered_at,
+    
+                            // 'is_packer_verified' => $item->is_packer_verified,
+    
+                            // 'packer_verified_by' => $item->packer_verified_by,
+    
+                            // 'packer_verified_user_name' => $item->packer_verified_user_name,
+    
+                            // 'packer_verified_at' => $item->packer_verified_at,
+                        ];
+                    })
+                    ->values(),
+            ];
+        });
+    
+        /*
+        |--------------------------------------------------------------------------
+        | Response
+        |--------------------------------------------------------------------------
+        */
         return response()->json([
             'success' => true,
-            'data' => $formattedOrders,
+    
+            'data' => $orders->items(),
+    
+            'pagination' => [
+                'current_page' => $orders->currentPage(),
+                'per_page' => $orders->perPage(),
+                'total' => $orders->total(),
+                'last_page' => $orders->lastPage(),
+                'from' => $orders->firstItem(),
+                'to' => $orders->lastItem(),
+                'has_more_pages' => $orders->hasMorePages(),
+                'next_page_url' => $orders->nextPageUrl(),
+                'previous_page_url' => $orders->previousPageUrl(),
+            ],
         ]);
     }
-
     /**
      * Assign a packer user to pack an order.
      * Rule: Order overall status must be 'picked' and ALL items in order must be picked.
      * Route: POST /api/orders/packer/assign-me
      * Route: POST /api/orders/packer/assign
      */
+    // public function assignPacker(Request $request)
+    // {
+        
+
+    //     if ($validator->fails()) {
+    //         return response()->json([
+    //             'success' => false,
+    //             'errors' => $validator->errors(),
+    //         ], 422);
+    //     }
+
+    //     $orderIdStr = (string) $request->input('order_id');
+
+    //     // Find Order
+    //     $order = Order::with(['items', 'packerAssignment'])
+    //         ->Where('order_number', $orderIdStr)
+    //         ->orWhere('order_number', ltrim($orderIdStr, '#'))
+    //         ->orWhere('order_number', '#' . ltrim($orderIdStr, '#'))
+    //         ->first();
+
+    //     if (!$order) {
+    //         return response()->json([
+    //             'success' => false,
+    //             'message' => "Order '{$orderIdStr}' not found.",
+    //         ], 404);
+    //     }
+
+    //     // Rule Check: Order status must be 'picked' AND all items must be picked
+    //     $unpickedItems = $order->items->filter(function ($item) {
+    //         return $item->status !== 'picked' && !in_array($item->status, ['packed', 'delivered']) && is_null($item->picked_by);
+    //     });
+
+    //     if ($order->status !== 'picked' || $unpickedItems->isNotEmpty()) {
+    //         return response()->json([
+    //             'success' => false,
+    //             'message' => "Cannot assign packer. Order status must be 'picked' and all items in the order must be picked before a packer can assign themselves.",
+    //             'order_status' => $order->status,
+    //             'unpicked_items_count' => $unpickedItems->count(),
+    //             'total_items_count' => $order->items->count(),
+    //             'unpicked_items' => $unpickedItems->map(function ($item) {
+    //                 return [
+    //                     'item_id' => $item->id,
+    //                     'line_item_id' => $item->line_item_id,
+    //                     'product_name' => $item->product_name,
+    //                     'status' => $item->status,
+    //                 ];
+    //             })->values(),
+    //         ], 400);
+    //     }
+
+    //     // Determine user (packer)
+    //     $user = Auth::user();
+    //     $userId = $user ? $user->id : ($request->input('packer_assigned_user_id') ?? $request->input('user_id'));
+    //     $dbUser = $userId ? \App\Models\User::find($userId) : null;
+    //     $validUserId = $dbUser ? $dbUser->id : null;
+    //     $userName = $user ? $user->name : ($dbUser ? $dbUser->name : ($request->input('packer_assigned_user_name') ?? $request->input('user_name') ?? 'Packer User'));
+
+    //     return DB::transaction(function () use ($order, $validUserId, $userName, $request) {
+    //         $assignment = OrderPackerAssigned::updateOrCreate(
+    //             ['order_id' => $order->id],
+    //             [
+    //                 'packer_assigned_user_id' => $validUserId,
+    //                 'packer_assigned_user_name' => $userName,
+    //                 'assigned_at' => now(),
+    //             ]
+    //         );
+
+    //         // Update order packed_by details
+    //         $order->update([
+    //             'packed_by' => $validUserId,
+    //             'packed_user_name' => $userName,
+    //             'packed_at' => now(),
+    //         ]);
+
+    //         $log = OrderStatusLog::create([
+    //             'order_id' => $order->id,
+    //             'user_id' => $validUserId,
+    //             'user_name' => $userName,
+    //             'action' => 'packer_assigned_to_order',
+    //             'old_status' => $order->status,
+    //             'new_status' => $order->status,
+    //             'notes' => $request->input('notes', "Packer {$userName} assigned to pack order {$order->order_number}"),
+    //         ]);
+
+    //         return response()->json([
+    //             'success' => true,
+    //             'message' => "Packer '{$userName}' successfully assigned to pack order {$order->order_number}.",
+    //             'data' => [
+    //                 'order' => $order->fresh(['items', 'packerAssignment']),
+    //                 'packer_assignment' => $assignment->fresh(),
+    //                 'log' => $log,
+    //             ],
+    //         ]);
+    //     });
+    // }
     public function assignPacker(Request $request)
     {
         $validator = Validator::make($request->all(), [
@@ -335,7 +1096,7 @@ class PackerManagementController extends Controller
             'packer_assigned_user_name' => 'nullable|string',
             'notes' => 'nullable|string',
         ]);
-
+       
         if ($validator->fails()) {
             return response()->json([
                 'success' => false,

@@ -74,6 +74,14 @@ class Order extends Model
     }
 
     /**
+     * Get return and replacement records for this order.
+     */
+    public function returnReplacements(): HasMany
+    {
+        return $this->hasMany(OrderReturnReplacement::class, 'order_id')->orderBy('created_at', 'desc');
+    }
+
+    /**
      * Get the user/picker assigned to this order.
      */
     public function assignedUser(): BelongsTo

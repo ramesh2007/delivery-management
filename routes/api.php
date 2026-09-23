@@ -29,6 +29,7 @@ use App\Http\Controllers\Api\Mobile\DiscrepancyController;
 
 
 
+
 Route::post('/login', [AuthController::class, 'login']);
 Route::post('/users', [UserController::class, 'store']); // Public registration
 
@@ -39,7 +40,7 @@ Route::match(['get', 'post'], '/orders/status/scheduled-items', [ScheduleControl
 Route::match(['get', 'post'], '/orders/scheduled-items', [ScheduleController::class, 'scheduledItems']);
 
 //Admin Routes
-Route::prefix('admin')->group(function(){
+Route::prefix('admin')->group(function () {
     Route::get('/ping', [\App\Http\Controllers\Api\ResourceController::class, 'ping']);
 
     // Dedicated Order Status List Endpoints (Paginated for Large Datasets)
@@ -73,9 +74,8 @@ Route::prefix('admin')->group(function(){
     Route::match(['get', 'post'], '/orders/installation-items', [OrderStatusApiController::class, 'installationOrders']);
     Route::match(['get', 'post'], '/orders/status/cancelled-delivery', [OrderStatusApiController::class, 'cancelledDelivery']);
     Route::match(['get', 'post'], '/orders/cancelled-delivery', [OrderStatusApiController::class, 'cancelledDelivery']);
-    Route::get('/orders/status/flagged', [OrderStatusApiController::class, 'flaggedOrders']);
-    Route::get('/orders/flagged', [OrderStatusApiController::class, 'flaggedOrders']);
-    Route::get('/orders/flagged-items', [OrderStatusApiController::class, 'flaggedOrders']);
+
+
 
     //driver assignment endpoints
     Route::post('/driver/assign', [DriverManagementController::class, 'assignDriver']);
@@ -86,8 +86,21 @@ Route::prefix('admin')->group(function(){
     Route::get('/drivers', [DriverManagementController::class, 'index']);
     // Payment Status Update Endpoint
     Route::post('/orders/update-payment-status', [PaymentsManagementController::class, 'updatePaymentStatus']);
+
+
+
+    // Scheduled and Installation Controller
+
+    Route::match(['get', 'post'], '/scheduled-installation', [ScheduledInstallationController::class, 'store']);
+    Route::get('/scheduled-installation/list', [ScheduledInstallationController::class, 'index']);
+
+    // Flagged Orders Management Endpoints
+
+    Route::get('/orders/flagged', [FlagController::class, 'index']);
+
     // Create Return / Replacement Endpoint
-    Route::post('/orders/return-replacement', [PaymentsManagementController::class, 'createReturnReplacement']);
+    Route::post('/orders/return-replacement', [ReturnReplacementController::class, 'createReturnReplacement']);
+    Route::get('/orders/get-return-replacements', [ReturnReplacementController::class, 'getReturnReplacements']);
 
     // Schedule Endpoints (Assignment & Item-wise Scheduled Listing)
     Route::post('/schedule/assign/{order_item_id?}', [ScheduleController::class, 'assignSchedule']);
@@ -223,9 +236,100 @@ Route::prefix('mobile')->group(function(){
 
 
 //Mobile App Routes
+
 // Picker & Packer Management List Endpoints
 Route::get('/get-pickers-list', [PickerManagementController::class, 'getPickersList']);
 Route::get('/get-packers-list', [PackerManagementController::class, 'getPackersList']);
+
+// Flutter App API to fetch assigned orders for a driver using driver user id
+Route::get('/driver/assigned-orders/{driver_user_id}', [DeliveryManagementController::class, 'getAssignedOrders']);
+Route::get('/driver-orders/{driver_user_id}', [DeliveryManagementController::class, 'getAssignedOrders']);
+
+// Flutter App API to update driver status (assigned, accepted, started, delivered, cancelled, refund, exchange)
+Route::post('/driver/update-status', [DeliveryManagementController::class, 'updateDriverStatus']);
+Route::post('/driver-orders/update-status', [DeliveryManagementController::class, 'updateDriverStatus']);
+
+// Flutter App Order Management API Endpoints (Sync, Item Status update, Picker Assignment, User Logs)
+Route::get('/orders', [PickerManagementController::class, 'index']);
+Route::get('/orders/{id}', [PickerManagementController::class, 'apiOrdersById']);
+Route::get('/orders-complete/{id}', [PickerManagementController::class, 'apiOrdersComplete']);
+Route::post('/orders/assign-me', [PickerManagementController::class, 'assignOrder']);
+Route::post('/orders/unassign', [PickerManagementController::class, 'unassignOrder']);
+Route::post('/orders/unassign-me', [PickerManagementController::class, 'unassignOrder']);
+Route::post('/orders/items/assign-me', [PickerManagementController::class, 'assignItems']);
+Route::post('/orders/items/unassign', [PickerManagementController::class, 'unassignItems']);
+Route::post('/orders/items/unassign-me', [PickerManagementController::class, 'unassignItems']);
+Route::post('/orders/items/update-status', [PickerManagementController::class, 'updateItemStatus']);
+
+// Assign and Unassign Picker with Order Items Array API Endpoints
+Route::post('/orders/assign-picker-items', [PickerManagementController::class, 'assignOrderWithItems']);
+Route::post('/orders/picker/assign-items', [PickerManagementController::class, 'assignOrderWithItems']);
+Route::post('/orders/assign-with-items', [PickerManagementController::class, 'assignOrderWithItems']);
+
+Route::post('/orders/unassign-picker-items', [PickerManagementController::class, 'unassignOrderWithItems']);
+Route::post('/orders/picker/unassign-items', [PickerManagementController::class, 'unassignOrderWithItems']);
+Route::post('/orders/unassign-with-items', [PickerManagementController::class, 'unassignOrderWithItems']);
+
+// Packer Workflow API Endpoints (Assignment, Barcode Verification, Bag Count & Order Lists)
+Route::get('/orders/packer/ready-to-pack', [PackerManagementController::class, 'getPickedOrdersForPacker']);
+Route::get('/orders/packer/picked/{user_id?}', [PackerManagementController::class, 'getPickedOrdersForPacker']);
+Route::get('/orders-picked/{id?}', [PackerManagementController::class, 'getPickedOrdersForPacker']);
+
+Route::get('/orders/packer/packed/{user_id?}', [PackerManagementController::class, 'getPackedOrders']);
+Route::get('/orders-packed/{id?}', [PackerManagementController::class, 'getPackedOrders']);
+Route::get('/orders/packed-completed/{id?}', [PackerManagementController::class, 'apiPackerOrdersComplete']);
+Route::get('/orders/packer/complete/{id?}', [PackerManagementController::class, 'apiPackerOrdersComplete']);
+
+Route::get('/orders/packer/{id}', [PackerManagementController::class, 'apiPackerOrdersById']);
+
+Route::post('/orders/packer/assign-me', [PackerManagementController::class, 'assignPacker']);
+Route::post('/orders/packer/assign', [PackerManagementController::class, 'assignPacker']);
+Route::post('/orders/packer/unassign-me', [PackerManagementController::class, 'unassignPacker']);
+Route::post('/orders/packer/unassign', [PackerManagementController::class, 'unassignPacker']);
+
+Route::post('/orders/assign-packer-items', [PackerManagementController::class, 'assignPackerWithItems']);
+Route::post('/orders/packer/assign-items', [PackerManagementController::class, 'assignPackerWithItems']);
+Route::post('/orders/assign-packer-with-items', [PackerManagementController::class, 'assignPackerWithItems']);
+
+Route::post('/orders/unassign-packer-items', [PackerManagementController::class, 'unassignPackerWithItems']);
+Route::post('/orders/packer/unassign-items', [PackerManagementController::class, 'unassignPackerWithItems']);
+Route::post('/orders/unassign-packer-with-items', [PackerManagementController::class, 'unassignPackerWithItems']);
+
+Route::post('/orders/packer/verify-item', [PackerManagementController::class, 'verifyItemBarcode']);
+Route::post('/orders/packer/complete-packing', [PackerManagementController::class, 'completePacking']);
+
+// Verified Bags API
+Route::post('/orders/packer/verify-bags', [DeliveryManagementController::class, 'verifyBags']);
+Route::post('/orders/verify-bags', [DeliveryManagementController::class, 'verifyBags']);
+Route::get('/orders/verified-bags/{order_number?}', [DeliveryManagementController::class, 'verifyBags']);
+
+//Order Item Driver side
+
+Route::post('/orders/driver/assigned', [DeliveryManagementController::class, 'assignedDriver']);
+Route::post('/orders/driver/accepted', [DeliveryManagementController::class, 'orderAccepted']);
+Route::post('/orders/driver/unaccepted', [DeliveryManagementController::class, 'orderUnaccepted']);
+Route::post('/orders/driver/start-delivery', [DeliveryManagementController::class, 'startDelivery']);
+Route::get('/orders/driver/started/{driver_user_id?}', [DeliveryManagementController::class, 'getStartedOrders']);
+Route::post('/orders/driver/update-status', [DeliveryManagementController::class, 'updateDriverStatus']);
+Route::post('/orders/driver/delivered', [DeliveryManagementController::class, 'orderDelivered']);
+Route::post('/orders/driver/mark-as-delivered', [DeliveryManagementController::class, 'markAsDelivered']);
+Route::post('/orders/driver/mark-delivered', [DeliveryManagementController::class, 'markAsDelivered']);
+Route::post('/orders/driver/cancelled', [DeliveryManagementController::class, 'orderCancelled']);
+Route::post('/orders/driver/refund', [DeliveryManagementController::class, 'orderRefund']);
+Route::post('/orders/driver/exchange', [DeliveryManagementController::class, 'orderExchange']);
+Route::post('/orders/driver/flag', [DeliveryManagementController::class, 'flagDelivery']);
+Route::post('/orders/driver/flag-delivery', [DeliveryManagementController::class, 'flagDelivery']);
+Route::get('/orders/driver/flagged/{driver_user_id?}', [DeliveryManagementController::class, 'getFlaggedOrders']);
+Route::get('/orders/driver/flagged-orders/{driver_user_id?}', [DeliveryManagementController::class, 'getFlaggedOrders']);
+Route::get('/orders/driver/discrepancies/{driver_user_id?}', [DeliveryManagementController::class, 'getDeliveryDiscrepancies']);
+
+// Order Item Discrepancy & Flagging Endpoints
+Route::post('/orders/items/flag-discrepancy', [DiscrepancyController::class, 'flagItemDiscrepancy']);
+Route::get('/orders/items/discrepancies', [DiscrepancyController::class, 'getDiscrepancies']);
+Route::post('/orders/items/resolve-discrepancy', [DiscrepancyController::class, 'resolveDiscrepancy']);
+Route::get('/order-management/orders/{id}', [OrderManagementController::class, 'show']);
+Route::post('/orders/{id}/status', [OrderManagementController::class, 'updateOrderStatus']);
+Route::get('/orders/{id}/logs', [OrderManagementController::class, 'getLogs']);
 
 Route::middleware('auth:sanctum')->group(function () {
     Route::post('/logout', [AuthController::class, 'logout']);
@@ -297,3 +401,4 @@ Route::get('/admin/order/{order}', [\App\Http\Controllers\Api\ResourceController
     ->where('order', '.*');
 Route::get('/order-details/{order}', [\App\Http\Controllers\Api\ResourceController::class, 'salesOrderDetail'])
     ->where('order', '.*');
+

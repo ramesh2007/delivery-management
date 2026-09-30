@@ -17,7 +17,7 @@ use Exception;
 
 class DeliveryManagementController extends Controller
 {
- 
+
     /**
      * Get list of assigned driver orders / assignments.
      * Route: POST /api/orders/driver/assigned
@@ -26,7 +26,10 @@ class DeliveryManagementController extends Controller
     public function assignedDriver(Request $request): JsonResponse
     {
         try {
-            $query = OrderDriverAssigned::with(['order.items', 'driver']);
+            $query = OrderDriverAssigned::with([
+                'order.items',
+                'driver'
+            ]);
 
             // Optional driver filter from request body or query parameter
             $driverId = $request->input('assigned_driver_user_id')
@@ -39,46 +42,97 @@ class DeliveryManagementController extends Controller
                 $query->where('assigned_driver_user_id', $driverId);
             }
 
-            // Optional driver status filter (assigned, accepted, started, delivered, cancelled, refund, exchange)
-            $driverStatus = $request->input('driver_status') ?? $request->query('driver_status');
+            // Optional driver status filter
+            // assigned, accepted, started, delivered, cancelled, refund, exchange
+            $driverStatus = $request->input('driver_status')
+                ?? $request->query('driver_status');
+
             if (!empty($driverStatus)) {
                 $query->where('driver_status', $driverStatus);
             }
 
             // Optional order status filter
-            $orderStatus = $request->input('order_status') ?? $request->query('order_status');
+            $orderStatus = $request->input('order_status')
+                ?? $request->query('order_status');
+
             if (!empty($orderStatus)) {
                 $query->where('order_status', $orderStatus);
             }
 
             // Optional search filter
-            $search = $request->input('search') ?? $request->query('search');
+            $search = $request->input('search')
+                ?? $request->query('search');
+
             if (!empty($search)) {
                 $query->where(function ($q) use ($search) {
                     $q->where('order_number', 'like', "%{$search}%")
-                      ->orWhere('driver_name', 'like', "%{$search}%")
-                      ->orWhere('zone', 'like', "%{$search}%");
+                        ->orWhere('driver_name', 'like', "%{$search}%")
+                        ->orWhere('zone', 'like', "%{$search}%");
                 });
             }
 
-            $assignments = $query->orderBy('updated_at', 'desc')->get();
+            /*
+            |--------------------------------------------------------------------------
+            | Pagination
+            |--------------------------------------------------------------------------
+            */
+            $perPage = (int) $request->input(
+                'per_page',
+                $request->query('per_page', 15)
+            );
 
-            $formattedAssignments = $assignments->map(function ($assignment) {
-                return $this->formatAssignmentData($assignment);
-            });
+            // Minimum 1, maximum 100
+            $perPage = max(1, min($perPage, 100));
 
+            $assignments = $query
+                ->orderBy('updated_at', 'desc')
+                ->paginate($perPage);
+
+            /*
+            |--------------------------------------------------------------------------
+            | Format paginated results
+            |--------------------------------------------------------------------------
+            */
+            $formattedAssignments = $assignments->getCollection()
+                ->map(function ($assignment) {
+                    return $this->formatAssignmentData($assignment);
+                })
+                ->values();
+
+            /*
+            |--------------------------------------------------------------------------
+            | Response
+            |--------------------------------------------------------------------------
+            */
             return response()->json([
                 'status' => 'success',
                 'message' => 'Assigned driver orders retrieved successfully.',
+
                 'count' => $formattedAssignments->count(),
-                'data' => $formattedAssignments
+
+                'data' => $formattedAssignments,
+
+                'pagination' => [
+                    'current_page' => $assignments->currentPage(),
+                    'per_page' => $assignments->perPage(),
+                    'total' => $assignments->total(),
+                    'last_page' => $assignments->lastPage(),
+                    'from' => $assignments->firstItem(),
+                    'to' => $assignments->lastItem(),
+                    'has_more_pages' => $assignments->hasMorePages(),
+                ],
             ], 200);
 
         } catch (Exception $e) {
-            Log::error('Get Assigned Driver List Error: ' . $e->getMessage());
+
+            Log::error(
+                'Get Assigned Driver List Error: ' . $e->getMessage()
+            );
+
             return response()->json([
                 'status' => 'error',
-                'message' => 'Failed to retrieve assigned driver orders: ' . $e->getMessage()
+                'message' => 'Failed to retrieve assigned driver orders: '
+                    . $e->getMessage()
             ], 500);
         }
     }
@@ -284,19 +338,19 @@ class DeliveryManagementController extends Controller
             $assignmentId = $request->input('assignment_id') ?? ($rawJson['assignment_id'] ?? null);
 
             // Payment & Delivery inputs
-            $paymentMethod = $request->input('payment_method') 
-                ?? ($rawJson['payment_method'] ?? null) 
-                ?? $request->input('payment_type') 
+            $paymentMethod = $request->input('payment_method')
+                ?? ($rawJson['payment_method'] ?? null)
+                ?? $request->input('payment_type')
                 ?? ($rawJson['payment_type'] ?? 'cash');
 
-            $paymentStatus = $request->input('payment_status') 
+            $paymentStatus = $request->input('payment_status')
                 ?? ($rawJson['payment_status'] ?? 'paid');
 
-            $amountInput = $request->input('amount') 
-                ?? ($rawJson['amount'] ?? null) 
-                ?? $request->input('collected_amount') 
-                ?? ($rawJson['collected_amount'] ?? null) 
-                ?? $request->input('total_amount') 
+            $amountInput = $request->input('amount')
+                ?? ($rawJson['amount'] ?? null)
+                ?? $request->input('collected_amount')
+                ?? ($rawJson['collected_amount'] ?? null)
+                ?? $request->input('total_amount')
                 ?? ($rawJson['total_amount'] ?? null);
 
             $notes = $request->input('notes') ?? ($rawJson['notes'] ?? null);
@@ -459,18 +513,18 @@ class DeliveryManagementController extends Controller
             $lineItemId = $request->input('line_item_id') ?? ($rawJson['line_item_id'] ?? null);
 
             $reason = strtolower(trim((string) (
-                $request->input('reason') 
-                ?? ($rawJson['reason'] ?? null) 
-                ?? $request->input('issue_type') 
-                ?? ($rawJson['issue_type'] ?? null) 
-                ?? $request->input('flag_reason') 
+                $request->input('reason')
+                ?? ($rawJson['reason'] ?? null)
+                ?? $request->input('issue_type')
+                ?? ($rawJson['issue_type'] ?? null)
+                ?? $request->input('flag_reason')
                 ?? ($rawJson['flag_reason'] ?? 'damaged')
             )));
 
             $comment = trim((string) (
-                $request->input('comment') 
-                ?? ($rawJson['comment'] ?? null) 
-                ?? $request->input('notes') 
+                $request->input('comment')
+                ?? ($rawJson['comment'] ?? null)
+                ?? $request->input('notes')
                 ?? ($rawJson['notes'] ?? '')
             ));
 
@@ -655,8 +709,8 @@ class DeliveryManagementController extends Controller
     public function getDeliveryDiscrepancies(Request $request, $driver_user_id = null): JsonResponse
     {
         try {
-            $driverId = $driver_user_id 
-                ?? $request->input('driver_user_id') 
+            $driverId = $driver_user_id
+                ?? $request->input('driver_user_id')
                 ?? $request->query('driver_user_id');
 
             $query = OrderItemDiscrepancy::with(['order.items', 'orderItem', 'user']);
@@ -720,22 +774,22 @@ class DeliveryManagementController extends Controller
     public function getFlaggedOrders(Request $request, $driver_user_id = null): JsonResponse
     {
         try {
-            $driverId = $driver_user_id 
-                ?? $request->input('driver_user_id') 
-                ?? $request->input('assigned_driver_user_id') 
-                ?? $request->query('driver_user_id') 
+            $driverId = $driver_user_id
+                ?? $request->input('driver_user_id')
+                ?? $request->input('assigned_driver_user_id')
+                ?? $request->query('driver_user_id')
                 ?? $request->query('assigned_driver_user_id');
 
             $query = OrderDriverAssigned::with(['order.items', 'driver'])
                 ->where(function ($q) {
                     $q->where('driver_status', 'flagged')
-                      ->orWhere('order_status', 'flagged')
-                      ->orWhereHas('order', function ($oq) {
-                          $oq->where('status', 'flagged')
-                            ->orWhereHas('items', function ($iq) {
-                                $iq->where('is_flagged', true);
-                            });
-                      });
+                        ->orWhere('order_status', 'flagged')
+                        ->orWhereHas('order', function ($oq) {
+                            $oq->where('status', 'flagged')
+                                ->orWhereHas('items', function ($iq) {
+                                    $iq->where('is_flagged', true);
+                                });
+                        });
                 });
 
             if (!empty($driverId)) {
@@ -961,95 +1015,291 @@ class DeliveryManagementController extends Controller
     public function getStartedOrders(Request $request, $driver_user_id = null): JsonResponse
     {
         try {
-            $driverId = $driver_user_id 
-                ?? $request->input('driver_user_id') 
-                ?? $request->input('assigned_driver_user_id') 
-                ?? $request->query('driver_user_id') 
+            $driverId = $driver_user_id
+                ?? $request->input('driver_user_id')
+                ?? $request->input('assigned_driver_user_id')
+                ?? $request->query('driver_user_id')
                 ?? $request->query('assigned_driver_user_id');
 
-            $query = OrderDriverAssigned::with(['order.items', 'driver'])
+            /*
+            |--------------------------------------------------------------------------
+            | Pagination
+            |--------------------------------------------------------------------------
+            */
+            $perPage = (int) $request->input(
+                'per_page',
+                $request->query('per_page', 15)
+            );
+
+            // Minimum 1, maximum 100
+            $perPage = max(1, min($perPage, 100));
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | Query Started Orders
+            |--------------------------------------------------------------------------
+            */
+            $query = OrderDriverAssigned::with([
+                'order.items',
+                'driver'
+            ])
                 ->where('driver_status', 'started');
 
+
+            /*
+            |--------------------------------------------------------------------------
+            | Driver Filter
+            |--------------------------------------------------------------------------
+            */
             if (!empty($driverId)) {
+
                 $driver = User::find($driverId);
+
                 if (!$driver) {
                     return response()->json([
                         'status' => 'error',
                         'message' => "Driver user ID '{$driverId}' not found."
                     ], 404);
                 }
+
                 $query->where('assigned_driver_user_id', $driverId);
             }
 
-            $assignments = $query->orderBy('started_at', 'desc')->orderBy('updated_at', 'desc')->get();
 
-            $formattedAssignments = $assignments->map(function ($assignment) {
-                $order = $assignment->order;
-                $bagCount = $order ? (int) ($order->bag_count ?? 0) : 0;
-                $itemsCount = $order && $order->items ? $order->items->count() : 0;
+            /*
+            |--------------------------------------------------------------------------
+            | Pagination
+            |--------------------------------------------------------------------------
+            */
+            $assignments = $query
+                ->orderBy('started_at', 'desc')
+                ->orderBy('updated_at', 'desc')
+                ->paginate($perPage);
 
-                return [
-                    'id' => $assignment->id,
-                    'order_id' => $assignment->order_id,
-                    'order_number' => $assignment->order_number,
-                    'assigned_driver_user_id' => $assignment->assigned_driver_user_id ? (int) $assignment->assigned_driver_user_id : null,
-                    'driver_name' => $assignment->driver_name,
-                    'zone' => $assignment->zone,
-                    'order_status' => $assignment->order_status,
-                    'driver_status' => $assignment->driver_status,
-                    'bag_count' => $bagCount,
-                    'items_count' => $itemsCount,
-                    'total_items' => $itemsCount,
-                    'assigned_at' => $assignment->assigned_at ? $assignment->assigned_at->toIso8601String() : null,
-                    'accepted_at' => $assignment->accepted_at ? $assignment->accepted_at->toIso8601String() : null,
-                    'started_at' => $assignment->started_at ? $assignment->started_at->toIso8601String() : null,
-                    'delivered_at' => $assignment->delivered_at ? $assignment->delivered_at->toIso8601String() : null,
-                    'created_at' => $assignment->created_at ? $assignment->created_at->toIso8601String() : null,
-                    'updated_at' => $assignment->updated_at ? $assignment->updated_at->toIso8601String() : null,
-                    'order' => $order ? [
-                        'id' => $order->id,
-                        'order_number' => $order->order_number,
-                        'customer_name' => $order->customer_name ?? 'N/A',
-                        'customer_phone' => $order->customer_phone ?? 'N/A',
-                        'delivery_address' => $order->delivery_address ?? 'N/A',
-                        'total_amount' => (float) $order->total_amount,
-                        'status' => $order->status,
+
+            /*
+            |--------------------------------------------------------------------------
+            | Format Assignments
+            |--------------------------------------------------------------------------
+            */
+            $formattedAssignments = $assignments->getCollection()
+                ->map(function ($assignment) {
+
+                    $order = $assignment->order;
+
+                    $bagCount = $order
+                        ? (int) ($order->bag_count ?? 0)
+                        : 0;
+
+                    $itemsCount = $order && $order->items
+                        ? $order->items->count()
+                        : 0;
+
+
+                    return [
+                        'id' => $assignment->id,
+
+                        'order_id' => $assignment->order_id,
+
+                        'order_number' => $assignment->order_number,
+
+                        'assigned_driver_user_id' =>
+                            $assignment->assigned_driver_user_id
+                            ? (int) $assignment->assigned_driver_user_id
+                            : null,
+
+                        'driver_name' => $assignment->driver_name,
+
+                        'zone' => $assignment->zone,
+
+                        'order_status' => $assignment->order_status,
+
+                        'driver_status' => $assignment->driver_status,
+
                         'bag_count' => $bagCount,
-                        'items_count' => $itemsCount,
-                        'total_items' => $itemsCount,
-                        'created_at' => $order->created_at ? $order->created_at->toIso8601String() : null,
-                        'items' => $order->items ? $order->items->map(function ($item) {
-                            return [
-                                'item_id' => $item->id,
-                                'line_item_id' => $item->line_item_id,
-                                'product_id' => $item->product_id,
-                                'product_code' => $item->product_code,
-                                'barcode' => $item->barcode,
-                                'product_name' => $item->product_name,
-                                'quantity' => (int) $item->quantity,
-                                'unit_price' => (float) $item->unit_price,
-                                'status' => $item->status,
-                                'is_packer_verified' => (bool) $item->is_packer_verified,
-                            ];
-                        })->values() : [],
-                    ] : null,
-                    'driver' => $assignment->driver,
-                ];
-            });
 
+                        'items_count' => $itemsCount,
+
+                        'total_items' => $itemsCount,
+
+                        'assigned_at' => $assignment->assigned_at
+                            ? $assignment->assigned_at->toIso8601String()
+                            : null,
+
+                        'accepted_at' => $assignment->accepted_at
+                            ? $assignment->accepted_at->toIso8601String()
+                            : null,
+
+                        'started_at' => $assignment->started_at
+                            ? $assignment->started_at->toIso8601String()
+                            : null,
+
+                        'delivered_at' => $assignment->delivered_at
+                            ? $assignment->delivered_at->toIso8601String()
+                            : null,
+
+                        'created_at' => $assignment->created_at
+                            ? $assignment->created_at->toIso8601String()
+                            : null,
+
+                        'updated_at' => $assignment->updated_at
+                            ? $assignment->updated_at->toIso8601String()
+                            : null,
+
+
+                        /*
+                        |--------------------------------------------------------------------------
+                        | Order
+                        |--------------------------------------------------------------------------
+                        */
+                        'order' => $order ? [
+
+                            'id' => $order->id,
+
+                            'order_number' => $order->order_number,
+
+                            'customer_name' =>
+                                $order->customer_name ?? 'N/A',
+
+                            'customer_phone' =>
+                                $order->customer_phone ?? 'N/A',
+
+                            'delivery_address' =>
+                                $order->delivery_address ?? 'N/A',
+
+                            'total_amount' =>
+                                (float) $order->total_amount,
+
+                            'status' => $order->status,
+
+                            'bag_count' => $bagCount,
+
+                            'items_count' => $itemsCount,
+
+                            'total_items' => $itemsCount,
+
+                            'created_at' => $order->created_at
+                                ? $order->created_at->toIso8601String()
+                                : null,
+
+
+                            /*
+                            |--------------------------------------------------------------------------
+                            | Order Items
+                            |--------------------------------------------------------------------------
+                            */
+                            'items' => $order->items
+                                ? $order->items->map(function ($item) {
+
+                                    return [
+                                        'item_id' => $item->id,
+
+                                        'line_item_id' =>
+                                            $item->line_item_id,
+
+                                        'product_id' =>
+                                            $item->product_id,
+
+                                        'product_code' =>
+                                            $item->product_code,
+
+                                        'barcode' =>
+                                            $item->barcode,
+
+                                        'product_name' =>
+                                            $item->product_name,
+
+                                        'quantity' =>
+                                            (int) $item->quantity,
+
+                                        'unit_price' =>
+                                            (float) $item->unit_price,
+
+                                        'status' =>
+                                            $item->status,
+
+                                        'is_packer_verified' =>
+                                            (bool) $item->is_packer_verified,
+                                    ];
+
+                                })->values()
+
+                                : [],
+
+                        ] : null,
+
+
+                        /*
+                        |--------------------------------------------------------------------------
+                        | Driver
+                        |--------------------------------------------------------------------------
+                        */
+                        'driver' => $assignment->driver,
+                    ];
+                })
+                ->values();
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | Response
+            |--------------------------------------------------------------------------
+            */
             return response()->json([
                 'status' => 'success',
-                'message' => 'Started delivery orders retrieved successfully.',
-                'driver_user_id' => $driverId ? (int) $driverId : null,
-                'count' => $formattedAssignments->count(),
-                'data' => $formattedAssignments
+
+                'message' =>
+                    'Started delivery orders retrieved successfully.',
+
+                'driver_user_id' =>
+                    $driverId ? (int) $driverId : null,
+
+                'count' =>
+                    $formattedAssignments->count(),
+
+                'data' =>
+                    $formattedAssignments,
+
+                'pagination' => [
+                    'current_page' =>
+                        $assignments->currentPage(),
+
+                    'per_page' =>
+                        $assignments->perPage(),
+
+                    'total' =>
+                        $assignments->total(),
+
+                    'last_page' =>
+                        $assignments->lastPage(),
+
+                    'from' =>
+                        $assignments->firstItem(),
+
+                    'to' =>
+                        $assignments->lastItem(),
+
+                    'has_more_pages' =>
+                        $assignments->hasMorePages(),
+                ],
+
             ], 200);
 
         } catch (Exception $e) {
-            Log::error('Get Started Delivery Orders Error: ' . $e->getMessage());
+
+            Log::error(
+                'Get Started Delivery Orders Error: '
+                . $e->getMessage()
+            );
+
             return response()->json([
                 'status' => 'error',
-                'message' => 'Failed to retrieve started delivery orders: ' . $e->getMessage()
+
+                'message' =>
+                    'Failed to retrieve started delivery orders: '
+                    . $e->getMessage()
+
             ], 500);
         }
     }
@@ -1412,7 +1662,7 @@ class DeliveryManagementController extends Controller
 
         return response()->json([
             'success' => true,
-            'message' => $isAllVerified 
+            'message' => $isAllVerified
                 ? "All {$totalItems} item(s) in Order {$order->order_number} are verified. Bag verification complete."
                 : "{$verifiedItemsCount} of {$totalItems} item(s) verified for Order {$order->order_number}.",
             'data' => [

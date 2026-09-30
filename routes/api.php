@@ -1,5 +1,6 @@
 <?php
 
+
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\AuthController;
@@ -26,6 +27,7 @@ use App\Http\Controllers\Api\Mobile\PackerManagementController;
 use App\Http\Controllers\Api\Mobile\PickerManagementController;
 use App\Http\Controllers\Api\Mobile\DeliveryManagementController;
 use App\Http\Controllers\Api\Mobile\DiscrepancyController;
+use App\Http\Controllers\Api\Mobile\ScheduledInstallationMobileController;
 
 
 
@@ -137,7 +139,7 @@ Route::prefix('admin')->group(function () {
 
 
 // Flutter App Order Management API Endpoints (Sync, Item Status update, Picker Assignment, User Logs)
-Route::prefix('mobile')->group(function(){
+Route::prefix('mobile')->group(function () {
     Route::post('/login', [AuthController::class, 'login']);
     //Picker apis.
     Route::get('/orders', [PickerManagementController::class, 'index']);
@@ -232,6 +234,12 @@ Route::prefix('mobile')->group(function(){
     Route::post('/driver/update-status', [DeliveryManagementController::class, 'updateDriverStatus']);
     Route::post('/driver-orders/update-status', [DeliveryManagementController::class, 'updateDriverStatus']);
 
+    // Scheduled installations (Mobile App)
+    Route::match(['get', 'post'], 'scheduled/get/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getScheduledInstallationByInstallerUserId']);
+    Route::match(['get', 'post'], 'scheduled/in-progress/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getInProgressInstallationsByInstallerUserId']);
+    Route::match(['get', 'post'], 'scheduled/inprogress/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getInProgressInstallationsByInstallerUserId']);
+    Route::match(['get', 'post'], 'scheduled/completed/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getCompletedInstallationsByInstallerUserId']);
+    Route::match(['get', 'post'], 'scheduled/update-status/{id?}', [ScheduledInstallationMobileController::class, 'updateStatus']);
 });
 
 

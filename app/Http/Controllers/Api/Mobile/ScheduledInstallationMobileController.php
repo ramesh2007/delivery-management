@@ -214,6 +214,9 @@ class ScheduledInstallationMobileController extends Controller
                             'installation_type' => $installation->installation_type,
                             'installation_level' => $installation->installation_level,
                             'status' => $installation->status ?? ($item->status ?? 'scheduled'),
+                            'notes' => $installation->notes ?? null,
+                            'images' => is_array($installation->images) ? $installation->images : (json_decode($installation->images ?? '[]', true) ?: []),
+                            'completed_at' => $installation->completed_at?->toIso8601String(),
                             'is_scheduled_assigned' => (bool) $installation->is_scheduled_assigned,
                         ] : null,
                         'is_scheduled' => in_array($item->status, ['scheduled', 'scheduled_installation', 'installation', 'in_progress', 'started'])
@@ -505,6 +508,9 @@ class ScheduledInstallationMobileController extends Controller
                             'installation_type' => $installation?->installation_type,
                             'installation_level' => $installation?->installation_level,
                             'status' => 'in_progress',
+                            'notes' => $installation?->notes ?? null,
+                            'images' => is_array($installation?->images) ? $installation->images : (json_decode($installation?->images ?? '[]', true) ?: []),
+                            'completed_at' => $installation?->completed_at?->toIso8601String(),
                             'is_scheduled_assigned' => (bool) ($installation?->is_scheduled_assigned ?? true),
                         ],
                         'updated_at' => $installation?->updated_at?->toIso8601String() ?? $order->updated_at?->toIso8601String(),
@@ -789,6 +795,9 @@ class ScheduledInstallationMobileController extends Controller
                             'installation_type' => $installation?->installation_type,
                             'installation_level' => $installation?->installation_level,
                             'status' => $resolvedStatus,
+                            'notes' => $installation?->notes ?? null,
+                            'images' => is_array($installation?->images) ? $installation->images : (json_decode($installation?->images ?? '[]', true) ?: []),
+                            'completed_at' => $installation?->completed_at?->toIso8601String(),
                             'is_scheduled_assigned' => (bool) ($installation?->is_scheduled_assigned ?? true),
                         ],
                         'updated_at' => $installation?->updated_at?->toIso8601String() ?? $order->updated_at?->toIso8601String(),
@@ -1308,6 +1317,301 @@ class ScheduledInstallationMobileController extends Controller
                 'status' => 'error',
                 'message' => 'Failed to update installation status.',
                 'error' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Upload multiple installed proof images and add notes for an order by order_number.
+     *
+     * Route: GET|POST /api/mobile/scheduled/installed-proof-upload
+     *
+     * @param Request $request
+     * @return JsonResponse
+     */
+    public function InstalledProofimageupload(Request $request): JsonResponse
+    {
+        try {
+            $orderNumber = $request->input('order_number') ?? $request->query('order_number');
+            $orderId = $request->input('order_id') ?? $request->query('order_id');
+
+            // 1. Validate that order_number or order_id is provided
+            if (empty($orderNumber) && empty($orderId)) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Order number or order ID is required. Pass order_number (e.g. #1001 or 1001).',
+                ], 422);
+            }
+
+            // 2. Resolve Target Order
+            $cleanNum = $orderNumber ? trim(ltrim((string) $orderNumber, '#')) : null;
+            $order = Order::with('items')->where(function ($q) use ($orderId, $orderNumber, $cleanNum) {
+                if ($orderId) {
+                    $q->orWhere('id', $orderId);
+                }
+                if ($orderNumber) {
+                    $q->orWhere('order_number', $orderNumber)
+                        ->orWhere('order_number', $cleanNum)
+                        ->orWhere('order_number', '#' . $cleanNum);
+                }
+            })->first();
+
+            if (!$order) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => "Order not found with order_number '{$orderNumber}'.",
+                ], 404);
+            }
+
+            // Target items for this order (prefer installable items if flagged, otherwise all items)
+            $orderItems = $order->items;
+            $targetItems = $orderItems->where('is_installable', true);
+            if ($targetItems->isEmpty()) {
+                $targetItems = $orderItems;
+            }
+
+            // Find existing installation records
+            $existingInstallations = OrderInstallation::whereIn('order_item_id', $orderItems->pluck('id'))->get();
+            $primaryInstallation = $existingInstallations->first();
+
+            // If GET request, return current installation details, images, and notes for this order
+            if ($request->isMethod('get')) {
+                $images = [];
+                if ($primaryInstallation?->images) {
+                    $images = is_array($primaryInstallation->images)
+                        ? $primaryInstallation->images
+                        : (json_decode($primaryInstallation->images, true) ?: [$primaryInstallation->images]);
+                }
+
+                return response()->json([
+                    'status' => 'success',
+                    'message' => 'Installed proof details retrieved successfully.',
+                    'data' => [
+                        'order_id' => $order->id,
+                        'order_number' => $order->order_number,
+                        'customer_name' => $order->customer_name,
+                        'order_status' => $order->status,
+                        'installation_status' => $primaryInstallation?->status ?? 'scheduled',
+                        'notes' => $primaryInstallation?->notes,
+                        'images_count' => count($images),
+                        'images' => $images,
+                        'completed_at' => $primaryInstallation?->completed_at?->toIso8601String(),
+                        'items_count' => $orderItems->count(),
+                    ],
+                ], 200);
+            }
+
+            // 3. Collect Multiple Uploaded Files
+            $uploadedFiles = [];
+            $fileKeys = ['images', 'photos', 'installed_images', 'files', 'image', 'photo', 'file', 'attachment', 'installed_image', 'proof_images'];
+
+            foreach ($fileKeys as $fKey) {
+                if ($request->hasFile($fKey)) {
+                    $files = $request->file($fKey);
+                    if (is_array($files)) {
+                        foreach ($files as $f) {
+                            if ($f instanceof \Illuminate\Http\UploadedFile && $f->isValid()) {
+                                $uploadedFiles[] = $f;
+                            }
+                        }
+                    } elseif ($files instanceof \Illuminate\Http\UploadedFile && $files->isValid()) {
+                        $uploadedFiles[] = $files;
+                    }
+                }
+            }
+
+            // Also check allFiles() in case dynamic names were used (e.g. image_0, image_1)
+            if (empty($uploadedFiles) && !empty($request->allFiles())) {
+                foreach ($request->allFiles() as $f) {
+                    if (is_array($f)) {
+                        foreach ($f as $subF) {
+                            if ($subF instanceof \Illuminate\Http\UploadedFile && $subF->isValid()) {
+                                $uploadedFiles[] = $subF;
+                            }
+                        }
+                    } elseif ($f instanceof \Illuminate\Http\UploadedFile && $f->isValid()) {
+                        $uploadedFiles[] = $f;
+                    }
+                }
+            }
+
+            $newImageUrls = [];
+            $uploadDir = public_path('uploads/installations');
+            if (!file_exists($uploadDir)) {
+                mkdir($uploadDir, 0777, true);
+            }
+
+            $orderRef = preg_replace('/[^A-Za-z0-9_\-]/', '', $order->order_number) ?: 'order_' . $order->id;
+
+            foreach ($uploadedFiles as $index => $file) {
+                $extension = $file->getClientOriginalExtension() ?: 'jpg';
+                $filename = 'proof_' . $orderRef . '_' . time() . '_' . substr(md5(uniqid((string) $index, true)), 0, 6) . '.' . $extension;
+                $file->move($uploadDir, $filename);
+                $newImageUrls[] = asset('uploads/installations/' . $filename);
+            }
+
+            // Support base64 encoded strings or direct URLs in payload
+            $inputImages = $request->input('images')
+                ?? $request->input('photos')
+                ?? $request->input('installed_images')
+                ?? $request->input('proof_images');
+
+            if (!empty($inputImages)) {
+                if (is_string($inputImages)) {
+                    $decoded = json_decode($inputImages, true);
+                    $inputImages = is_array($decoded) ? $decoded : [$inputImages];
+                }
+
+                if (is_array($inputImages)) {
+                    foreach ($inputImages as $imgItem) {
+                        if (is_string($imgItem)) {
+                            if (preg_match('/^data:image\/(\w+);base64,/', $imgItem, $typeMatches)) {
+                                $b64Data = substr($imgItem, strpos($imgItem, ',') + 1);
+                                $ext = strtolower($typeMatches[1]) ?: 'jpg';
+                                $decodedData = base64_decode($b64Data);
+                                if ($decodedData !== false) {
+                                    $filename = 'proof_' . $orderRef . '_' . time() . '_' . substr(md5(uniqid()), 0, 6) . '.' . $ext;
+                                    file_put_contents($uploadDir . DIRECTORY_SEPARATOR . $filename, $decodedData);
+                                    $newImageUrls[] = asset('uploads/installations/' . $filename);
+                                }
+                            } elseif (filter_var($imgItem, FILTER_VALIDATE_URL)) {
+                                $newImageUrls[] = $imgItem;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. Notes Handling
+            $notes = $request->input('notes')
+                ?? $request->input('note')
+                ?? $request->input('comment')
+                ?? $request->input('comments')
+                ?? $request->input('description')
+                ?? $request->input('remarks');
+
+            // Validate that either images, notes, or status were provided
+            if (empty($newImageUrls) && $notes === null && !$request->has('status') && !$request->has('installation_status')) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Please provide images to upload or notes to add.',
+                ], 422);
+            }
+
+            // 5. Status & Completed_at Updates (Optional)
+            $oldStatus = $primaryInstallation?->status ?? $order->status ?? 'scheduled';
+            $statusParam = $request->input('status') ?? $request->input('installation_status');
+            $normalizedStatus = null;
+
+            if ($statusParam) {
+                $statusParam = strtolower(trim((string) $statusParam));
+                if (in_array($statusParam, ['inprogress', 'in progress', 'started'])) {
+                    $normalizedStatus = 'in_progress';
+                } elseif (in_array($statusParam, ['installed', 'completed', 'done'])) {
+                    $normalizedStatus = 'installed';
+                } else {
+                    $normalizedStatus = $statusParam;
+                }
+            }
+
+            // 6. Merge or Replace Images & Persist to Order Installations
+            $replaceImages = filter_var($request->input('replace_images', false), FILTER_VALIDATE_BOOLEAN);
+
+            $existingImages = [];
+            if ($primaryInstallation && !empty($primaryInstallation->images)) {
+                if (is_array($primaryInstallation->images)) {
+                    $existingImages = $primaryInstallation->images;
+                } else {
+                    $decoded = json_decode($primaryInstallation->images, true);
+                    $existingImages = is_array($decoded) ? $decoded : [$primaryInstallation->images];
+                }
+            }
+
+            $finalImages = $replaceImages
+                ? $newImageUrls
+                : array_values(array_unique(array_merge($existingImages, $newImageUrls)));
+
+            $itemsToUpdate = $targetItems->isNotEmpty() ? $targetItems : $orderItems;
+
+            if ($itemsToUpdate->isNotEmpty()) {
+                foreach ($itemsToUpdate as $item) {
+                    $inst = OrderInstallation::firstOrCreate(['order_item_id' => $item->id]);
+
+                    if (!empty($finalImages) || $replaceImages) {
+                        $inst->images = $finalImages;
+                    }
+                    if ($notes !== null) {
+                        $inst->notes = trim((string) $notes);
+                    }
+                    if ($normalizedStatus) {
+                        $inst->status = $normalizedStatus;
+                        if (in_array($normalizedStatus, ['installed', 'completed'])) {
+                            $inst->completed_at = now();
+                            if (in_array($item->status, ['pending', 'picked', 'packed', 'delivered', 'scheduled'])) {
+                                $item->update(['status' => 'installed']);
+                            }
+                        }
+                    }
+                    $inst->is_scheduled_assigned = true;
+                    $inst->save();
+                }
+            }
+
+            // Update order status if status was provided
+            if ($normalizedStatus) {
+                if ($normalizedStatus === 'in_progress') {
+                    $order->update(['status' => 'in_progress']);
+                } elseif (in_array($normalizedStatus, ['installed', 'completed'])) {
+                    $order->update(['status' => $normalizedStatus]);
+                }
+            }
+
+            // 7. Log in OrderStatusLog
+            $userName = $request->input('user_name') ?? (Auth::user()?->name ?? 'Mobile Installer');
+            $userId = $request->input('user_id') ?? Auth::id();
+            $logAction = !empty($newImageUrls) ? 'installed_proof_uploaded' : 'installation_notes_updated';
+
+            $logNote = $notes
+                ? (count($newImageUrls) > 0 ? "Uploaded " . count($newImageUrls) . " image(s). Note: {$notes}" : "Note: {$notes}")
+                : "Uploaded " . count($newImageUrls) . " installation proof image(s).";
+
+            OrderStatusLog::create([
+                'order_id' => $order->id,
+                'order_item_id' => $itemsToUpdate->first()?->id,
+                'user_id' => $userId,
+                'user_name' => $userName,
+                'action' => $logAction,
+                'old_status' => $oldStatus,
+                'new_status' => $normalizedStatus ?? $oldStatus,
+                'notes' => $logNote,
+            ]);
+
+            return response()->json([
+                'status' => 'success',
+                'message' => 'Installed proof images and notes saved successfully.',
+                'data' => [
+                    'order_id' => $order->id,
+                    'order_number' => $order->order_number,
+                    'customer_name' => $order->customer_name,
+                    'order_status' => $order->fresh()->status,
+                    'installation_status' => $normalizedStatus ?? ($primaryInstallation?->status ?? 'scheduled'),
+                    'notes' => $notes !== null ? trim((string) $notes) : ($primaryInstallation?->notes ?? null),
+                    'uploaded_count' => count($newImageUrls),
+                    'newly_uploaded_images' => $newImageUrls,
+                    'images' => $finalImages,
+                    'completed_at' => (in_array($normalizedStatus, ['installed', 'completed'])) ? now()->toIso8601String() : $primaryInstallation?->completed_at?->toIso8601String(),
+                ],
+            ], 200);
+
+        } catch (Exception $e) {
+            Log::error('Error in InstalledProofimageupload: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString(),
+                'request' => $request->except(['images', 'photos', 'proof_images']),
+            ]);
+
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Failed to upload installed proof images and save notes: ' . $e->getMessage(),
             ], 500);
         }
     }

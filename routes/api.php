@@ -240,6 +240,7 @@ Route::prefix('mobile')->group(function () {
     Route::match(['get', 'post'], 'scheduled/inprogress/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getInProgressInstallationsByInstallerUserId']);
     Route::match(['get', 'post'], 'scheduled/completed/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getCompletedInstallationsByInstallerUserId']);
     Route::match(['get', 'post'], 'scheduled/update-status/{id?}', [ScheduledInstallationMobileController::class, 'updateStatus']);
+    Route::match(['get', 'post'], 'scheduled/installed-proof-upload', [ScheduledInstallationMobileController::class, 'InstalledProofimageupload']);
 });
 
 

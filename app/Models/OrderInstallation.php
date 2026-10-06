@@ -18,10 +18,15 @@ class OrderInstallation extends Model
         'installation_level',
         'status',
         'is_scheduled_assigned',
+        'notes',
+        'images',
+        'completed_at',
     ];
 
     protected $casts = [
         'is_scheduled_assigned' => 'boolean',
+        'images' => 'array',
+        'completed_at' => 'datetime',
     ];
 
     /**

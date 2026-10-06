@@ -141,18 +141,173 @@ class OrderStatusApiController extends Controller
      * 2. GET /api/orders/new or /api/orders/status/new
      * Retrieve newly synced/pending orders (status = 'pending').
      */
+    // public function newOrders(Request $request)
+    // {
+    //     $this->handleSilentSync($request);
+    //     $perPage = max(1, min((int) $request->query('per_page', 15), 100));
+
+    //     $paginator = $this->getBaseOrderQuery($request)
+    //         ->where('status', 'pending')
+    //         ->orderBy('created_at', 'desc')
+    //         ->paginate($perPage);
+        
+    //     return $this->buildPaginatedResponse($paginator, 'new', 'New orders retrieved successfully.');
+    // }
+
     public function newOrders(Request $request)
     {
         $this->handleSilentSync($request);
+
         $perPage = max(1, min((int) $request->query('per_page', 15), 100));
 
         $paginator = $this->getBaseOrderQuery($request)
             ->where('status', 'pending')
             ->orderBy('created_at', 'desc')
             ->paginate($perPage);
-        
-        return $this->buildPaginatedResponse($paginator, 'new', 'New orders retrieved successfully.');
+
+        $data = $paginator->getCollection()->map(function ($order) {
+
+            return [
+
+                // =========================
+                // ORDER
+                // =========================
+
+                'order_id' => $order->id,
+                'order_number' => $order->order_number,
+                'status' => $order->status,
+                // 'bag_count' => (int) ($order->bag_count ?? 0),
+
+                // =========================
+                // CUSTOMER
+                // =========================
+
+                'customer' => [
+                    'name' => $order->customer_name ?? 'N/A',
+                    'phone' => $order->customer_phone ?? 'N/A',
+                    // 'delivery_address' => $order->delivery_address ?? 'N/A',
+                ],
+
+                // =========================
+                // PAYMENT
+                // =========================
+
+                'payment' => $order->payment ? [
+                    // 'id' => $order->payment->id,
+                    'shopify_order_id' => $order->payment->shopify_order_id,
+                    // 'payment_method' => $order->payment->payment_method,
+                    'payment_status' => $order->payment->payment_status,
+                    // 'paid_amount' => (float) $order->payment->paid_amount,
+                    'total_price' => (float) $order->payment->total_price,
+                    // 'total_outstanding' => (float) $order->payment->total_outstanding,
+                    'currency' => $order->payment->currency,
+
+                    'processed_at' => $order->payment->processed_at
+                        ? $order->payment->processed_at->toIso8601String()
+                        : null,
+
+                    'shopify_created_at' => $order->payment->shopify_created_at
+                        ? $order->payment->shopify_created_at->toIso8601String()
+                        : null,
+
+                    'shopify_updated_at' => $order->payment->shopify_updated_at
+                        ? $order->payment->shopify_updated_at->toIso8601String()
+                        : null,
+
+                ] : [
+                    // 'payment_method' => $order->payment_method,
+                    // 'payment_status' => $order->payment_status,
+                    // 'paid_amount' => (float) ($order->collected_amount ?? 0.00),
+                    'total_price' => (float) $order->total_amount,
+                    // 'total_outstanding' => (float) $order->total_amount,
+                    // 'currency' => 'QAR',
+                    // 'processed_at' => null,
+                ],
+
+                // =========================
+                // SUMMARY
+                // =========================
+
+                'summary' => [
+                    'total_amount' => (float) $order->total_amount,
+                    'total_items' => $order->items->count(),
+                ],
+
+                // =========================
+                // ITEMS
+                // =========================
+
+                'items' => $order->items->map(function ($item) {
+
+                    return [
+
+                        'item_id' => $item->id,
+                        'line_item_id' => $item->line_item_id,
+                        // 'product_id' => $item->product_id,
+
+                        // 'product_code' => $item->product_code,
+                        // 'barcode' => $item->barcode,
+                        // 'product_name' => $item->product_name,
+
+                        // 'image' => $item->image,
+                        // 'image_url' => $item->image,
+
+                        // 'quantity' => $item->quantity,
+                        // 'unit_price' => (float) $item->unit_price,
+
+                        // 'is_installable' => (bool) $item->is_installable,
+
+                        // 'installation_type' => $item->installation
+                        //     ? $item->installation->installation_type
+                        //     : null,
+
+                        // 'installation_level' => $item->installation
+                        //     ? $item->installation->installation_level
+                        //     : null,
+
+                        // 'installation' => $item->installation ? [
+                        //     'id' => $item->installation->id,
+                        //     'installation_type' => $item->installation->installation_type,
+                        //     'installation_level' => $item->installation->installation_level,
+                        //     'is_scheduled_assigned' => (bool) (
+                        //         $item->installation->is_scheduled_assigned ?? false
+                        //     ),
+                        // ] : null,
+
+                        // 'is_flagged' => (bool) $item->is_flagged,
+                        // 'flag_reason' => $item->flag_reason,
+                    ];
+
+                })->values(),
+
+                // =========================
+                // TIMESTAMPS
+                // =========================
+
+                'created_at' => $order->created_at
+                    ? $order->created_at->toIso8601String()
+                    : null,
+
+                'updated_at' => $order->updated_at
+                    ? $order->updated_at->toIso8601String()
+                    : null,
+            ];
+        })->values();
+
+        return response()->json([
+            'success' => true,
+            'data' => $data,
+            'pagination' => [
+                'current_page' => $paginator->currentPage(),
+                'per_page' => $paginator->perPage(),
+                'total' => $paginator->total(),
+                'last_page' => $paginator->lastPage(),
+                'from' => $paginator->firstItem(),
+                'to' => $paginator->lastItem(),
+            ],
+        ]);
     }
+
 
     /**
      * 3. GET /api/orders/ready-to-assign or /api/orders/status/ready-to-assign

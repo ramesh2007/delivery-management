@@ -26,7 +26,7 @@ use App\Http\Controllers\Api\Mobile\PackerManagementController;
 use App\Http\Controllers\Api\Mobile\PickerManagementController;
 use App\Http\Controllers\Api\Mobile\DeliveryManagementController;
 use App\Http\Controllers\Api\Mobile\DiscrepancyController;
-
+use App\Http\Controllers\Api\Mobile\ScheduledInstallationMobileController;
 
 
 
@@ -48,7 +48,7 @@ Route::prefix('admin')->group(function () {
     Route::get('/orders/all', [OrderStatusApiController::class, 'all']);
 
     Route::get('/orders/status/new', [OrderStatusApiController::class, 'newOrders']);
-    Route::get('/orders/new', [OrderStatusApiController::class, 'newOrders']);
+    // Route::get('/orders/new', [OrderStatusApiController::class, 'newOrders']);
 
     Route::get('/orders/status/ready-to-assign', [OrderStatusApiController::class, 'readyToAssign']);
     Route::get('/orders/ready-to-assign', [OrderStatusApiController::class, 'readyToAssign']);
@@ -84,6 +84,15 @@ Route::prefix('admin')->group(function () {
     // Driver Management & Order Assignment Endpoints (React.js Frontend & Flutter App)
     Route::get('/get-drivers-list', [DriverManagementController::class, 'index']);
     Route::get('/drivers', [DriverManagementController::class, 'index']);
+
+    //Pickers 
+    Route::get('/get-pickers-list', [PickerAdminController::class, 'getPickersList']);
+    Route::any('/assign-items-by-picker', [PickerAdminController::class, 'assignItemsByPicker']);
+    Route::any('/orders/unassign-picker-items',[PickerAdminController::class,'unassignItemsByPicker']);
+    Route::any('/orders/assign-order-wise-picker',[PickerAdminController::class,'assignOrderWithItems']);
+    //Packers
+    Route::get('/get-packers-list', [PackerAdminController::class, 'getPackersList']);
+
     // Payment Status Update Endpoint
     Route::post('/orders/update-payment-status', [PaymentsManagementController::class, 'updatePaymentStatus']);
 
@@ -105,16 +114,12 @@ Route::prefix('admin')->group(function () {
     // Schedule Endpoints (Assignment & Item-wise Scheduled Listing)
     Route::post('/schedule/assign/{order_item_id?}', [ScheduleController::class, 'assignSchedule']);
     Route::match(['get', 'post'], '/orders/status/scheduled-items', [ScheduleController::class, 'scheduledItems']);
-    Route::match(['get', 'post'], '/orders/status/scheduled', [ScheduleController::class, 'scheduledItems']);
-    Route::match(['get', 'post'], '/orders/status/scheduled-assigned', [ScheduleController::class, 'scheduledItems']);
-    Route::match(['get', 'post'], '/orders/scheduled-items', [ScheduleController::class, 'scheduledItems']);
-    Route::match(['get', 'post'], '/schedule/items', [ScheduleController::class, 'scheduledItems']);
-    Route::match(['get', 'post'], '/schedule/assigned-items', [ScheduleController::class, 'scheduledItems']);
+    // Route::match(['get', 'post'], '/orders/status/scheduled', [ScheduleController::class, 'scheduledItems']);
+    // Route::match(['get', 'post'], '/orders/status/scheduled-assigned', [ScheduleController::class, 'scheduledItems']);
+    // Route::match(['get', 'post'], '/orders/scheduled-items', [ScheduleController::class, 'scheduledItems']);
+    // Route::match(['get', 'post'], '/schedule/items', [ScheduleController::class, 'scheduledItems']);
+    // Route::match(['get', 'post'], '/schedule/assigned-items', [ScheduleController::class, 'scheduledItems']);
 
-    //Pickers 
-    Route::get('/get-pickers-list', [PickerAdminController::class, 'getPickersList']);
-    //Packers
-    Route::get('/get-packers-list', [PackerAdminController::class, 'getPackersList']);
     // Scheduled and Installation Controller
 
     Route::match(['get', 'post'], '/scheduled-installation', [ScheduledInstallationController::class, 'store']);
@@ -231,7 +236,13 @@ Route::prefix('mobile')->group(function(){
     // Flutter App API to update driver status (assigned, accepted, started, delivered, cancelled, refund, exchange)
     Route::post('/driver/update-status', [DeliveryManagementController::class, 'updateDriverStatus']);
     Route::post('/driver-orders/update-status', [DeliveryManagementController::class, 'updateDriverStatus']);
-
+    //schedule installation
+    Route::match(['get', 'post'], 'scheduled/get/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getScheduledInstallationByInstallerUserId']);
+    Route::match(['get', 'post'], 'scheduled/in-progress/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getInProgressInstallationsByInstallerUserId']);
+    Route::match(['get', 'post'], 'scheduled/inprogress/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getInProgressInstallationsByInstallerUserId']);
+    Route::match(['get', 'post'], 'scheduled/completed/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getCompletedInstallationsByInstallerUserId']);
+    Route::match(['get', 'post'], 'scheduled/update-status/{id?}', [ScheduledInstallationMobileController::class, 'updateStatus']);
+    Route::match(['get', 'post'], 'scheduled/installed-proof-upload', [ScheduledInstallationMobileController::class, 'InstalledProofimageupload']);
 });
 
 

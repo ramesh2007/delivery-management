@@ -953,6 +953,7 @@ class PickerManagementController extends Controller
         }
     ])
     ->where('status', 'picking')
+    ->orWhere('status', 'pending')
 
     // Important:
     // Order must have at least one item assigned
@@ -1710,516 +1711,517 @@ class PickerManagementController extends Controller
      * Assign specific order item(s) to picker ("Assign Me Items")
      * Route: POST /api/orders/items/assign-me
      */
-public function assignItems(Request $request)
-{
-    $validator = Validator::make($request->all(), [
-        'order_id' => 'required',
+    public function assignItems(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'order_id' => 'required',
 
-        'line_item_id' => 'nullable|string',
-        'line_item_ids' => 'nullable|array',
-        'line_item_ids.*' => 'nullable|string',
+            'line_item_id' => 'nullable|string',
+            'line_item_ids' => 'nullable|array',
+            'line_item_ids.*' => 'nullable|string',
 
-        'order_item_id' => 'nullable',
-        'order_item_ids' => 'nullable|array',
-        'order_item_ids.*' => 'nullable',
+            'order_item_id' => 'nullable',
+            'order_item_ids' => 'nullable|array',
+            'order_item_ids.*' => 'nullable',
 
-        'user_id' => 'nullable',
-        'user_name' => 'nullable|string',
+            'user_id' => 'nullable',
+            'user_name' => 'nullable|string',
 
-        'notes' => 'nullable|string',
-    ]);
+            'notes' => 'nullable|string',
+        ]);
 
-    if ($validator->fails()) {
-        return response()->json([
-            'success' => false,
-            'errors' => $validator->errors(),
-        ], 422);
-    }
-
-    // ============================================================
-    // 1. Identify picker
-    // ============================================================
-
-    $authUser = Auth::user();
-
-    $userId = $authUser
-        ? $authUser->id
-        : (
-            $request->input('picker_id')
-            ?? $request->input('user_id')
-            ?? $request->input('assigned_to')
-        );
-
-    if ($userId !== null && is_numeric($userId)) {
-        $userId = (int) $userId;
-    }
-
-    $dbUser = $userId
-        ? \App\Models\User::find($userId)
-        : null;
-
-    $userName = $authUser
-        ? $authUser->name
-        : (
-            $dbUser
-                ? $dbUser->name
-                : (
-                    $request->input('picker_name')
-                    ?? $request->input('user_name')
-                )
-        );
-
-    // If user ID was not supplied, try finding by name
-    if (!$userId && $userName) {
-
-        $foundUser = \App\Models\User::where(
-            'name',
-            'like',
-            "%{$userName}%"
-        )->first();
-
-        if ($foundUser) {
-            $userId = $foundUser->id;
-            $userName = $foundUser->name;
-        }
-    }
-
-    if (!$userId) {
-        return response()->json([
-            'success' => false,
-            'message' => 'Picker user ID is required.',
-        ], 422);
-    }
-
-    if (!$userName) {
-        $userName = 'Picker User';
-    }
-
-
-    // ============================================================
-    // 2. Transaction
-    // ============================================================
-
-    return DB::transaction(function () use (
-        $request,
-        $userId,
-        $userName
-    ) {
-
-        // ========================================================
-        // 3. Normalize order ID
-        // ========================================================
-
-        $orderIdStr = trim((string) $request->input('order_id'));
-        $cleanOrderId = ltrim($orderIdStr, '#');
-
-
-        // ========================================================
-        // 4. Get requested line item IDs
-        // ========================================================
-
-        $lineItemIds = [];
-
-        if ($request->filled('line_item_id')) {
-            $lineItemIds[] = (string) $request->input('line_item_id');
-        }
-
-        if ($request->filled('line_item_ids')) {
-
-            foreach (
-                (array) $request->input('line_item_ids')
-                as $lineItemId
-            ) {
-                if ($lineItemId !== null && $lineItemId !== '') {
-                    $lineItemIds[] = (string) $lineItemId;
-                }
-            }
-        }
-
-        $lineItemIds = array_values(
-            array_unique($lineItemIds)
-        );
-
-
-        // ========================================================
-        // 5. Get requested order item IDs
-        // ========================================================
-
-        $orderItemIds = [];
-
-        if ($request->filled('order_item_id')) {
-            $orderItemIds[] = $request->input('order_item_id');
-        }
-
-        if ($request->filled('order_item_ids')) {
-
-            foreach (
-                (array) $request->input('order_item_ids')
-                as $orderItemId
-            ) {
-                if ($orderItemId !== null && $orderItemId !== '') {
-                    $orderItemIds[] = $orderItemId;
-                }
-            }
-        }
-
-        $orderItemIds = array_values(
-            array_unique($orderItemIds)
-        );
-
-
-        // ========================================================
-        // 6. Validate item identifiers
-        // ========================================================
-
-        if (
-            empty($lineItemIds) &&
-            empty($orderItemIds)
-        ) {
+        if ($validator->fails()) {
             return response()->json([
                 'success' => false,
-                'message' =>
-                    'Please provide line_item_id, line_item_ids, '
-                    . 'order_item_id, or order_item_ids.',
+                'errors' => $validator->errors(),
             ], 422);
         }
 
+        // ============================================================
+        // 1. Identify picker
+        // ============================================================
 
-        // ========================================================
-        // 7. Find order
-        // ========================================================
+        $authUser = Auth::user();
 
-        $order = Order::where(function ($query) use (
-            $orderIdStr,
-            $cleanOrderId
-        ) {
-            $query
-                ->where('id', $orderIdStr)
-                ->orWhere('order_number', $orderIdStr)
-                ->orWhere('order_number', $cleanOrderId)
-                ->orWhere('order_number', '#' . $cleanOrderId);
-        })->first();
+        $userId = $authUser
+            ? $authUser->id
+            : (
+                $request->input('picker_id')
+                ?? $request->input('user_id')
+                ?? $request->input('assigned_to')
+            );
 
+        if ($userId !== null && is_numeric($userId)) {
+            $userId = (int) $userId;
+        }
 
-        // ========================================================
-        // 8. If order doesn't exist, sync Shopify
-        // ========================================================
+        $dbUser = $userId
+            ? \App\Models\User::find($userId)
+            : null;
 
-        if (!$order) {
+        $userName = $authUser
+            ? $authUser->name
+            : (
+                $dbUser
+                    ? $dbUser->name
+                    : (
+                        $request->input('picker_name')
+                        ?? $request->input('user_name')
+                    )
+            );
 
-            try {
+        // If user ID was not supplied, try finding by name
+        if (!$userId && $userName) {
 
-                $this->shopifyService->syncOrdersToDatabase();
+            $foundUser = \App\Models\User::where(
+                'name',
+                'like',
+                "%{$userName}%"
+            )->first();
 
-                $order = Order::where(function ($query) use (
-                    $orderIdStr,
-                    $cleanOrderId
-                ) {
-                    $query
-                        ->where('id', $orderIdStr)
-                        ->orWhere('order_number', $orderIdStr)
-                        ->orWhere(
-                            'order_number',
-                            $cleanOrderId
-                        )
-                        ->orWhere(
-                            'order_number',
-                            '#' . $cleanOrderId
-                        );
-                })->first();
-
-            } catch (\Exception $e) {
-
-                \Log::error(
-                    'Shopify order sync failed during item assignment',
-                    [
-                        'order_id' => $orderIdStr,
-                        'error' => $e->getMessage(),
-                    ]
-                );
+            if ($foundUser) {
+                $userId = $foundUser->id;
+                $userName = $foundUser->name;
             }
         }
 
-
-        // ========================================================
-        // 9. Order not found
-        // ========================================================
-
-        if (!$order) {
-
+        if (!$userId) {
             return response()->json([
                 'success' => false,
-                'message' => "Order '{$orderIdStr}' not found.",
-            ], 404);
+                'message' => 'Picker user ID is required.',
+            ], 422);
+        }
+
+        if (!$userName) {
+            $userName = 'Picker User';
         }
 
 
-        // ========================================================
-        // 10. Find requested order items
-        // ========================================================
+        // ============================================================
+        // 2. Transaction
+        // ============================================================
 
-        $itemsQuery = OrderItem::where(
-            'order_id',
-            $order->id
-        );
-
-        $itemsQuery->where(function ($query) use (
-            $lineItemIds,
-            $orderItemIds
+        return DB::transaction(function () use (
+            $request,
+            $userId,
+            $userName
         ) {
 
-            if (!empty($lineItemIds)) {
-                $query->whereIn(
-                    'line_item_id',
-                    $lineItemIds
-                );
+            // ========================================================
+            // 3. Normalize order ID
+            // ========================================================
+
+            $orderIdStr = trim((string) $request->input('order_id'));
+            $cleanOrderId = ltrim($orderIdStr, '#');
+
+
+            // ========================================================
+            // 4. Get requested line item IDs
+            // ========================================================
+
+            $lineItemIds = [];
+
+            if ($request->filled('line_item_id')) {
+                $lineItemIds[] = (string) $request->input('line_item_id');
             }
 
-            if (!empty($orderItemIds)) {
+            if ($request->filled('line_item_ids')) {
 
-                if (!empty($lineItemIds)) {
-                    $query->orWhereIn(
-                        'id',
-                        $orderItemIds
-                    );
-                } else {
-                    $query->whereIn(
-                        'id',
-                        $orderItemIds
+                foreach (
+                    (array) $request->input('line_item_ids')
+                    as $lineItemId
+                ) {
+                    if ($lineItemId !== null && $lineItemId !== '') {
+                        $lineItemIds[] = (string) $lineItemId;
+                    }
+                }
+            }
+
+            $lineItemIds = array_values(
+                array_unique($lineItemIds)
+            );
+
+
+            // ========================================================
+            // 5. Get requested order item IDs
+            // ========================================================
+
+            $orderItemIds = [];
+
+            if ($request->filled('order_item_id')) {
+                $orderItemIds[] = $request->input('order_item_id');
+            }
+
+            if ($request->filled('order_item_ids')) {
+
+                foreach (
+                    (array) $request->input('order_item_ids')
+                    as $orderItemId
+                ) {
+                    if ($orderItemId !== null && $orderItemId !== '') {
+                        $orderItemIds[] = $orderItemId;
+                    }
+                }
+            }
+
+            $orderItemIds = array_values(
+                array_unique($orderItemIds)
+            );
+
+
+            // ========================================================
+            // 6. Validate item identifiers
+            // ========================================================
+
+            if (
+                empty($lineItemIds) &&
+                empty($orderItemIds)
+            ) {
+                return response()->json([
+                    'success' => false,
+                    'message' =>
+                        'Please provide line_item_id, line_item_ids, '
+                        . 'order_item_id, or order_item_ids.',
+                ], 422);
+            }
+
+
+            // ========================================================
+            // 7. Find order
+            // ========================================================
+
+            $order = Order::where(function ($query) use (
+                $orderIdStr,
+                $cleanOrderId
+            ) {
+                $query
+                    ->where('id', $orderIdStr)
+                    ->orWhere('order_number', $orderIdStr)
+                    ->orWhere('order_number', $cleanOrderId)
+                    ->orWhere('order_number', '#' . $cleanOrderId);
+            })->first();
+
+
+            // ========================================================
+            // 8. If order doesn't exist, sync Shopify
+            // ========================================================
+
+            if (!$order) {
+
+                try {
+
+                    $this->shopifyService->syncOrdersToDatabase();
+
+                    $order = Order::where(function ($query) use (
+                        $orderIdStr,
+                        $cleanOrderId
+                    ) {
+                        $query
+                            ->where('id', $orderIdStr)
+                            ->orWhere('order_number', $orderIdStr)
+                            ->orWhere(
+                                'order_number',
+                                $cleanOrderId
+                            )
+                            ->orWhere(
+                                'order_number',
+                                '#' . $cleanOrderId
+                            );
+                    })->first();
+
+                } catch (\Exception $e) {
+
+                    \Log::error(
+                        'Shopify order sync failed during item assignment',
+                        [
+                            'order_id' => $orderIdStr,
+                            'error' => $e->getMessage(),
+                        ]
                     );
                 }
             }
-        });
-
-        $items = $itemsQuery
-            ->lockForUpdate()
-            ->get();
 
 
-        // ========================================================
-        // 11. No matching items
-        // ========================================================
+            // ========================================================
+            // 9. Order not found
+            // ========================================================
 
-        if ($items->isEmpty()) {
+            if (!$order) {
 
-            return response()->json([
-                'success' => false,
-                'message' =>
-                    'No matching order items found for this order.',
-                'data' => [
-                    'order_id' => $order->id,
-                    'order_number' => $order->order_number,
-                    'requested_line_item_ids' => $lineItemIds,
-                    'requested_order_item_ids' => $orderItemIds,
-                ],
-            ], 404);
-        }
-
-
-        // ========================================================
-        // 12. Prevent assigning already assigned items
-        //
-        // If assigned to SAME picker, we also don't overwrite it.
-        // ========================================================
-
-        $alreadyAssignedItems = $items->filter(
-            function ($item) {
-                return !is_null($item->assigned_to);
+                return response()->json([
+                    'success' => false,
+                    'message' => "Order '{$orderIdStr}' not found.",
+                ], 404);
             }
-        );
-
-        if ($alreadyAssignedItems->isNotEmpty()) {
-
-            return response()->json([
-                'success' => false,
-                'message' =>
-                    'Cannot assign item(s). One or more items are already assigned. '
-                    . 'Please unassign them first.',
-                'data' => [
-                    'already_assigned_count' =>
-                        $alreadyAssignedItems->count(),
-
-                    'already_assigned_items' =>
-                        $alreadyAssignedItems
-                            ->map(function ($item) {
-
-                                return [
-                                    'item_id' => $item->id,
-                                    'line_item_id' =>
-                                        $item->line_item_id,
-                                    'product_name' =>
-                                        $item->product_name,
-                                    'assigned_to' =>
-                                        $item->assigned_to,
-                                    'assigned_user_name' =>
-                                        $item->assigned_user_name,
-                                    'assigned_at' =>
-                                        $item->assigned_at,
-                                ];
-                            })
-                            ->values(),
-                ],
-            ], 400);
-        }
 
 
-        // ========================================================
-        // 13. Assign requested items to picker
-        // ========================================================
+            // ========================================================
+            // 10. Find requested order items
+            // ========================================================
 
-        $assignedAt = now();
+            $itemsQuery = OrderItem::where(
+                'order_id',
+                $order->id
+            );
 
-        $assignedItems = collect();
+            $itemsQuery->where(function ($query) use (
+                $lineItemIds,
+                $orderItemIds
+            ) {
 
-        foreach ($items as $item) {
+                if (!empty($lineItemIds)) {
+                    $query->whereIn(
+                        'line_item_id',
+                        $lineItemIds
+                    );
+                }
 
-            $oldItemStatus = $item->status;
+                if (!empty($orderItemIds)) {
 
-            $item->update([
-                'assigned_to' => $userId,
-                'assigned_user_name' => $userName,
-                'assigned_at' => $assignedAt,
-            ]);
+                    if (!empty($lineItemIds)) {
+                        $query->orWhereIn(
+                            'id',
+                            $orderItemIds
+                        );
+                    } else {
+                        $query->whereIn(
+                            'id',
+                            $orderItemIds
+                        );
+                    }
+                }
+            });
 
-            $item->refresh();
-
-            $assignedItems->push($item);
-
-
-            // ----------------------------------------------------
-            // Log item assignment
-            // ----------------------------------------------------
-
-            OrderStatusLog::create([
-                'order_id' => $order->id,
-                'order_item_id' => $item->id,
-
-                'user_id' => $userId,
-                'user_name' => $userName,
-
-                'action' => 'item_assigned_to_picker',
-
-                'old_status' => $oldItemStatus,
-                'new_status' => $oldItemStatus,
-
-                'notes' => $request->input(
-                    'notes',
-                    "Assigned item {$item->product_name} to picker {$userName}"
-                ),
-            ]);
-        }
+            $items = $itemsQuery
+                ->lockForUpdate()
+                ->get();
 
 
-        // ========================================================
-        // 14. IMPORTANT:
-        // Check ALL items belonging to this order
-        // ========================================================
+            // ========================================================
+            // 11. No matching items
+            // ========================================================
 
-        $allOrderItems = OrderItem::where(
-            'order_id',
-            $order->id
-        )->get();
+            if ($items->isEmpty()) {
 
-
-        $totalItems = $allOrderItems->count();
-
-        $assignedItemsCount = $allOrderItems
-            ->whereNotNull('assigned_to')
-            ->count();
-
-        $unassignedItemsCount = $allOrderItems
-            ->whereNull('assigned_to')
-            ->count();
-
-        $allItemsAssigned =
-            $totalItems > 0 &&
-            $unassignedItemsCount === 0;
+                return response()->json([
+                    'success' => false,
+                    'message' =>
+                        'No matching order items found for this order.',
+                    'data' => [
+                        'order_id' => $order->id,
+                        'order_number' => $order->order_number,
+                        'requested_line_item_ids' => $lineItemIds,
+                        'requested_order_item_ids' => $orderItemIds,
+                    ],
+                ], 404);
+            }
 
 
-        // ========================================================
-        // 15. Order-level assignment
-        //
-        // ONLY update order assignment when ALL items are assigned.
-        // ========================================================
-
-        $oldOrderStatus = $order->status;
-
-        if ($allItemsAssigned) {
-
-            $order->update([
-                'assigned_to' => $userId,
-                'assigned_user_name' => $userName,
-                'assigned_at' => $assignedAt,
-
-                // Final item assigned -> order is now picking
-                'status' => 'picking',
-            ]);
-
-        } else {
-
-            // Some items are still unassigned.
+            // ========================================================
+            // 12. Prevent assigning already assigned items
             //
-            // Do NOT mark the order as fully assigned.
-            // Keep existing status if it is already picking.
-            //
-            // If it is pending, it can remain pending.
+            // If assigned to SAME picker, we also don't overwrite it.
+            // ========================================================
 
-            if ($order->status !== 'picking') {
-                $order->update([
-                    'status' => 'pending',
+            $alreadyAssignedItems = $items->filter(
+                function ($item) {
+                    return !is_null($item->assigned_to);
+                }
+            );
+
+            if ($alreadyAssignedItems->isNotEmpty()) {
+
+                return response()->json([
+                    'success' => false,
+                    'message' =>
+                        'Cannot assign item(s). One or more items are already assigned. '
+                        . 'Please unassign them first.',
+                    'data' => [
+                        'already_assigned_count' =>
+                            $alreadyAssignedItems->count(),
+
+                        'already_assigned_items' =>
+                            $alreadyAssignedItems
+                                ->map(function ($item) {
+
+                                    return [
+                                        'item_id' => $item->id,
+                                        'line_item_id' =>
+                                            $item->line_item_id,
+                                        'product_name' =>
+                                            $item->product_name,
+                                        'assigned_to' =>
+                                            $item->assigned_to,
+                                        'assigned_user_name' =>
+                                            $item->assigned_user_name,
+                                        'assigned_at' =>
+                                            $item->assigned_at,
+                                    ];
+                                })
+                                ->values(),
+                    ],
+                ], 400);
+            }
+
+
+            // ========================================================
+            // 13. Assign requested items to picker
+            // ========================================================
+
+            $assignedAt = now();
+
+            $assignedItems = collect();
+
+            foreach ($items as $item) {
+
+                $oldItemStatus = $item->status;
+
+                $item->update([
+                    'assigned_to' => $userId,
+                    'assigned_user_name' => $userName,
+                    'assigned_at' => $assignedAt,
+                    'status' => 'picker_assigned',
+                ]);
+
+                $item->refresh();
+
+                $assignedItems->push($item);
+
+
+                // ----------------------------------------------------
+                // Log item assignment
+                // ----------------------------------------------------
+
+                 OrderStatusLog::create([
+                    'order_id' => $order->id,
+                    'order_item_id' => $item->id,
+
+                    'user_id' => $userId,
+                    'user_name' => $userName,
+
+                    'action' => 'item_assigned_to_picker',
+
+                    'old_status' => $oldItemStatus,
+                    'new_status' => 'picker_assigned',
+
+                    'notes' => $request->input(
+                        'notes',
+                        "Assigned item {$item->product_name} to picker {$userName}"
+                    ),
                 ]);
             }
-        }
 
 
-        $order->refresh();
+            // ========================================================
+            // 14. IMPORTANT:
+            // Check ALL items belonging to this order
+            // ========================================================
+
+            $allOrderItems = OrderItem::where(
+                'order_id',
+                $order->id
+            )->get();
 
 
-        // ========================================================
-        // 16. Response
-        // ========================================================
+            $totalItems = $allOrderItems->count();
 
-        return response()->json([
-            'success' => true,
+            $assignedItemsCount = $allOrderItems
+                ->whereNotNull('assigned_to')
+                ->count();
 
-            'message' => $allItemsAssigned
-                ? "Successfully assigned {$assignedItems->count()} item(s) to picker {$userName}. All items in this order are now assigned."
-                : "Successfully assigned {$assignedItems->count()} item(s) to picker {$userName}. {$unassignedItemsCount} item(s) are still unassigned.",
+            $unassignedItemsCount = $allOrderItems
+                ->whereNull('assigned_to')
+                ->count();
 
-            'data' => [
+            $allItemsAssigned =
+                $totalItems > 0 &&
+                $unassignedItemsCount === 0;
 
-                'assigned_user' => [
-                    'id' => $userId,
-                    'name' => $userName,
+
+            // ========================================================
+            // 15. Order-level assignment
+            //
+            // ONLY update order assignment when ALL items are assigned.
+            // ========================================================
+
+            $oldOrderStatus = $order->status;
+
+            if ($allItemsAssigned) {
+
+                $order->update([
+                    'assigned_to' => $userId,
+                    'assigned_user_name' => $userName,
+                    'assigned_at' => $assignedAt,
+
+                    // Final item assigned -> order is now picking
+                    'status' => 'picking',
+                ]);
+
+            } else {
+
+                // Some items are still unassigned.
+                //
+                // Do NOT mark the order as fully assigned.
+                // Keep existing status if it is already picking.
+                //
+                // If it is pending, it can remain pending.
+
+                if ($order->status !== 'picking') {
+                    $order->update([
+                        'status' => 'pending',
+                    ]);
+                }
+            }
+
+
+            $order->refresh();
+
+
+            // ========================================================
+            // 16. Response
+            // ========================================================
+
+            return response()->json([
+                'success' => true,
+
+                'message' => $allItemsAssigned
+                    ? "Successfully assigned {$assignedItems->count()} item(s) to picker {$userName}. All items in this order are now assigned."
+                    : "Successfully assigned {$assignedItems->count()} item(s) to picker {$userName}. {$unassignedItemsCount} item(s) are still unassigned.",
+
+                'data' => [
+
+                    'assigned_user' => [
+                        'id' => $userId,
+                        'name' => $userName,
+                    ],
+
+                    'order' => [
+                        'id' => $order->id,
+                        'order_number' => $order->order_number,
+
+                        'old_status' => $oldOrderStatus,
+                        'new_status' => $order->status,
+
+                        'assigned_to' => $order->assigned_to,
+                        'assigned_user_name' =>
+                            $order->assigned_user_name,
+                        'assigned_at' =>
+                            $order->assigned_at,
+
+                        'total_items' => $totalItems,
+
+                        'assigned_items' => $assignedItemsCount,
+
+                        'unassigned_items' => $unassignedItemsCount,
+
+                        'all_items_assigned' => $allItemsAssigned,
+                    ],
+
+                    'items' => $assignedItems,
                 ],
-
-                'order' => [
-                    'id' => $order->id,
-                    'order_number' => $order->order_number,
-
-                    'old_status' => $oldOrderStatus,
-                    'new_status' => $order->status,
-
-                    'assigned_to' => $order->assigned_to,
-                    'assigned_user_name' =>
-                        $order->assigned_user_name,
-                    'assigned_at' =>
-                        $order->assigned_at,
-
-                    'total_items' => $totalItems,
-
-                    'assigned_items' => $assignedItemsCount,
-
-                    'unassigned_items' => $unassignedItemsCount,
-
-                    'all_items_assigned' => $allItemsAssigned,
-                ],
-
-                'items' => $assignedItems,
-            ],
-        ]);
-    });
-}
+            ]);
+        });
+    }
     /**
      * Assign order or order items to current picker (Unified endpoint)
      */

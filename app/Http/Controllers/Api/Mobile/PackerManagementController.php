@@ -393,16 +393,20 @@ class PackerManagementController extends Controller
     {
         $idStr = trim((string) $id);
 
-        // Auto-sync orders from Shopify silently
-        if ($request->boolean('auto_sync', true)) {
-            try {
-                $this->shopifyService->syncOrdersToDatabase();
-            } catch (\Exception $e) {
-                // Ignore sync error if offline
+        if (!$idStr) {
+            $idStr = $request->query('user_id')
+                ?? $request->query('packer_id')
+                ?? $request->query('id');
+
+            if ($idStr) {
+                $idStr = trim((string) $idStr);
             }
         }
 
+        // Direct local database query on `orders` and `order_items` tables.
+        // No Shopify API sync to prevent delays.
         $orders = Order::with([
+            'items',
             'items.assignedUser',
             'items.pickedUser',
             'items.packedUser',
@@ -422,67 +426,27 @@ class PackerManagementController extends Controller
               ->orWhereHas('packerAssignment', function ($pa) use ($idStr) {
                   $pa->where('packer_assigned_user_id', $idStr)
                     ->orWhere('packer_assigned_user_name', $idStr);
+              })
+              ->orWhereHas('items', function ($iq) use ($idStr) {
+                  $iq->where('packed_by', $idStr)
+                    ->orWhere('packed_user_name', $idStr);
               });
         })
         ->orderBy('updated_at', 'desc')
         ->get();
 
-        $formattedOrders = $orders->map(fn($order) => $this->formatOrderDetails($order, 'picked'))
-            ->filter(fn($ord) => count($ord['items']) > 0 || $ord['status'] === 'picked')
-            ->values();
+        $itemFilter = $request->query('item_filter', 'all');
+
+        $formattedOrders = $orders->map(function ($order) use ($itemFilter) {
+            return $this->formatOrderDetails($order, $itemFilter);
+        })->values();
 
         return response()->json([
             'success' => true,
+            'count' => $formattedOrders->count(),
             'data' => $formattedOrders,
         ]);
     }
-    //  public function apiPackerOrdersById(Request $request, $id)
-    // {
-    //     $idStr = trim((string) $id);
-
-    //     // Auto-sync orders from Shopify silently
-    //     if ($request->boolean('auto_sync', true)) {
-    //         try {
-    //             $this->shopifyService->syncOrdersToDatabase();
-    //         } catch (\Exception $e) {
-    //             // Ignore sync error if offline
-    //         }
-    //     }
-
-    //     $orders = Order::with([
-    //         'items.assignedUser',
-    //         'items.pickedUser',
-    //         'items.packedUser',
-    //         'items.deliveredUser',
-    //         'items.packerVerifiedUser',
-    //         'assignedUser',
-    //         'pickedUser',
-    //         'packedUser',
-    //         'deliveredUser',
-    //         'packerAssignment',
-    //         'logs.user',
-    //     ])
-    //     ->where('status', 'picked')
-    //     ->where(function ($q) use ($idStr) {
-    //         $q->where('packed_by', $idStr)
-    //           ->orWhere('packed_user_name', $idStr)
-    //           ->orWhereHas('packerAssignment', function ($pa) use ($idStr) {
-    //               $pa->where('packer_assigned_user_id', $idStr)
-    //                 ->orWhere('packer_assigned_user_name', $idStr);
-    //           });
-    //     })
-    //     ->orderBy('updated_at', 'desc')
-    //     ->get();
-
-    //     $formattedOrders = $orders->map(fn($order) => $this->formatOrderDetails($order, 'picked'))
-    //         ->filter(fn($ord) => count($ord['items']) > 0 || $ord['status'] === 'picked')
-    //         ->values();
-
-    //     return response()->json([
-    //         'success' => true,
-    //         'data' => $formattedOrders,
-    //     ]);
-    // }
 
     /**
      * Get completed packed orders for a specific packer user ID (status = 'packed' or 'delivered')
@@ -1648,6 +1612,8 @@ class PackerManagementController extends Controller
                     'product_image' => $item->image,
                     'product_image_url' => $item->image,
                     'barcode' => $item->barcode,
+                    'sku' => $item->sku ?? $item->product_code,
+                    'product_code' => $item->product_code,
                     'quantity' => (int) $item->quantity,
                     'unit_price' => (float) $item->unit_price,
                     'total_price' => (float) $item->total_price,

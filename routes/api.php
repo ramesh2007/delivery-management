@@ -27,6 +27,7 @@ use App\Http\Controllers\Api\Mobile\PickerManagementController;
 use App\Http\Controllers\Api\Mobile\DeliveryManagementController;
 use App\Http\Controllers\Api\Mobile\DiscrepancyController;
 use App\Http\Controllers\Api\Mobile\ScheduledInstallationMobileController;
+use App\Http\Controllers\Api\Mobile\DashboardController;
 
 
 
@@ -88,8 +89,8 @@ Route::prefix('admin')->group(function () {
     //Pickers 
     Route::get('/get-pickers-list', [PickerAdminController::class, 'getPickersList']);
     Route::any('/assign-items-by-picker', [PickerAdminController::class, 'assignItemsByPicker']);
-    Route::any('/orders/unassign-picker-items',[PickerAdminController::class,'unassignItemsByPicker']);
-    Route::any('/orders/assign-order-wise-picker',[PickerAdminController::class,'assignOrderWithItems']);
+    Route::any('/orders/unassign-picker-items', [PickerAdminController::class, 'unassignItemsByPicker']);
+    Route::any('/orders/assign-order-wise-picker', [PickerAdminController::class, 'assignOrderWithItems']);
     //Packers
     Route::get('/get-packers-list', [PackerAdminController::class, 'getPackersList']);
 
@@ -142,8 +143,9 @@ Route::prefix('admin')->group(function () {
 
 
 // Flutter App Order Management API Endpoints (Sync, Item Status update, Picker Assignment, User Logs)
-Route::prefix('mobile')->group(function(){
+Route::prefix('mobile')->group(function () {
     Route::post('/login', [AuthController::class, 'login']);
+
     //Picker apis.
     Route::get('/orders', [PickerManagementController::class, 'index']);
     Route::get('/orders/{id}', [PickerManagementController::class, 'apiOrdersById']);
@@ -243,10 +245,16 @@ Route::prefix('mobile')->group(function(){
     Route::match(['get', 'post'], 'scheduled/completed/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getCompletedInstallationsByInstallerUserId']);
     Route::match(['get', 'post'], 'scheduled/update-status/{id?}', [ScheduledInstallationMobileController::class, 'updateStatus']);
     Route::match(['get', 'post'], 'scheduled/installed-proof-upload', [ScheduledInstallationMobileController::class, 'InstalledProofimageupload']);
+
+    //Mobile Dashboard Endpoints
+
+    Route::match(['get', 'post'], '/picker/dashboard/{picker_id?}', [DashboardController::class, 'pickerDashboard']);
+    Route::match(['get', 'post'], '/packer/dashboard/{packer_id?}', [DashboardController::class, 'packerDashboard']);
+    Route::match(['get', 'post'], '/driver/dashboard/{driver_id?}', [DashboardController::class, 'driverDashboard']);
+    Route::match(['get', 'post'], '/installer/dashboard/{installer_id?}', [DashboardController::class, 'installationDashboard']);
+
+
 });
-
-
-//Mobile App Routes
 
 // Picker & Packer Management List Endpoints
 Route::get('/get-pickers-list', [PickerManagementController::class, 'getPickersList']);
@@ -363,6 +371,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Profile route
     Route::get('/profile', [AuthController::class, 'profile']);
+
 
     // Test routes for role & permission authorization middleware
     Route::get('/test-role', function () {

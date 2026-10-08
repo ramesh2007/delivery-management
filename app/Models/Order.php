@@ -88,8 +88,9 @@ class Order extends Model
     {
         return $this->belongsTo(User::class, 'assigned_to');
     }
-    public function pickedUser(){
-        return $this->belongsTo(User::Class,'picked_by');
+    public function pickedUser()
+    {
+        return $this->belongsTo(User::class, 'picked_by');
     }
     /**
      * Get the user who packed this order.
@@ -130,10 +131,10 @@ class Order extends Model
     {
         return $this->hasOne(OrderPayment::class, 'order_id');
     }
-    public function returnReplacements(): HasMany
-    {
-        return $this->hasMany(OrderReturnReplacement::class, 'order_id')->orderBy('created_at', 'desc');
-    }
+    // public function returnReplacements(): HasMany
+    // {
+    //     return $this->hasMany(OrderReturnReplacement::class, 'order_id')->orderBy('created_at', 'desc');
+    // }
 }
 
 

@@ -734,7 +734,7 @@ class PackerManagementController extends Controller
                 // 'items.rack',
                 // 'items.bin',
             ])
-            ->whereIn('status', ['packed']);
+            ->whereIn('status', ['packed','ready_to_assign']);
     
         /*
         |--------------------------------------------------------------------------
@@ -1732,20 +1732,10 @@ class PackerManagementController extends Controller
     public function assignPackerWithItems(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'orders' => 'nullable|array',
-            'order_id' => 'required_without:orders',
+            'order_id'    => 'required',
             'order_items' => 'nullable|array',
-            'order_item_ids' => 'nullable|array',
-            'items' => 'nullable|array',
-            'line_item_ids' => 'nullable|array',
-            'packer_id' => 'nullable',
-            'user_id' => 'nullable',
-            'packed_by' => 'nullable',
-            'packer_assigned_user_id' => 'nullable',
+            'packer_id'   => 'nullable',
             'packer_name' => 'nullable|string',
-            'user_name' => 'nullable|string',
-            'packer_assigned_user_name' => 'nullable|string',
-            'notes' => 'nullable|string',
         ]);
 
         if ($validator->fails()) {
@@ -1755,171 +1745,327 @@ class PackerManagementController extends Controller
             ], 422);
         }
 
-        // Determine packer user details globally or fallback
+        /*
+        |--------------------------------------------------------------------------
+        | Packer Details
+        |--------------------------------------------------------------------------
+        */
         $authUser = Auth::user();
-        $globalUserId = $authUser ? $authUser->id : ($request->input('packer_id') ?? $request->input('user_id') ?? $request->input('packed_by') ?? $request->input('packer_assigned_user_id'));
+
+        $globalUserId = $request->input('packer_id');
 
         if ($globalUserId && is_numeric($globalUserId)) {
             $globalUserId = (int) $globalUserId;
         }
 
-        $dbUser = $globalUserId ? \App\Models\User::find($globalUserId) : null;
-        $globalUserName = $authUser ? $authUser->name : ($dbUser ? $dbUser->name : ($request->input('packer_name') ?? $request->input('user_name') ?? $request->input('packer_assigned_user_name')));
+        $dbUser = $globalUserId
+            ? \App\Models\User::find($globalUserId)
+            : null;
 
-        if (!$globalUserId && $globalUserName) {
-            $foundUser = \App\Models\User::where('name', 'like', "%{$globalUserName}%")->first();
-            if ($foundUser) {
-                $globalUserId = $foundUser->id;
-                $globalUserName = $foundUser->name;
-            }
-        }
+        $globalUserName = $request->input('packer_name')
+            ?? ($dbUser ? $dbUser->name : null)
+            ?? ($authUser ? $authUser->name : null);
 
+        /*
+        |--------------------------------------------------------------------------
+        | Packer ID / Name Validation
+        |--------------------------------------------------------------------------
+        */
         if (!$globalUserId && !$globalUserName) {
             return response()->json([
                 'success' => false,
-                'message' => 'User identification required. Please pass packer_id, user_id, packed_by, or user_name.',
+                'message' => 'Packer identification required. Please pass packer_id or packer_name.',
             ], 422);
         }
 
-        return DB::transaction(function () use ($request, $authUser, $globalUserId, $globalUserName) {
-            $ordersPayload = [];
-            if ($request->filled('orders') && is_array($request->input('orders'))) {
-                $ordersPayload = $request->input('orders');
-            } else {
-                $itemsInput = $request->input('order_items')
-                    ?? $request->input('order_item_ids')
-                    ?? $request->input('items')
-                    ?? $request->input('line_item_ids')
-                    ?? [];
+        return DB::transaction(function () use (
+            $request,
+            $authUser,
+            $globalUserId,
+            $globalUserName
+        ) {
 
-                $ordersPayload[] = [
-                    'order_id' => $request->input('order_id'),
-                    'order_items' => $itemsInput,
-                    'packer_id' => $request->input('packer_id') ?? $request->input('user_id') ?? $request->input('packed_by') ?? $request->input('packer_assigned_user_id'),
-                    'packer_name' => $request->input('packer_name') ?? $request->input('user_name') ?? $request->input('packer_assigned_user_name'),
-                ];
-            }
+            /*
+            |--------------------------------------------------------------------------
+            | Build Order Payload
+            |--------------------------------------------------------------------------
+            */
+            $ordersPayload = [
+                [
+                    'order_id'    => $request->input('order_id'),
+                    'order_items' => $request->input('order_items', []),
+                    'packer_id'   => $request->input('packer_id'),
+                    'packer_name' => $request->input('packer_name'),
+                ]
+            ];
 
             $processedOrders = [];
             $totalAssignedItemsCount = 0;
 
+            /*
+            |--------------------------------------------------------------------------
+            | Process Order
+            |--------------------------------------------------------------------------
+            */
             foreach ($ordersPayload as $orderEntry) {
-                $orderIdRaw = trim((string) ($orderEntry['order_id'] ?? $orderEntry['id'] ?? ''));
+
+                $orderIdRaw = trim(
+                    (string) ($orderEntry['order_id'] ?? '')
+                );
+
                 if (empty($orderIdRaw)) {
                     continue;
                 }
 
-                // Resolve per-entry packer user ID & name
-                $entryUserId = $orderEntry['packer_id'] ?? $orderEntry['user_id'] ?? $orderEntry['packed_by'] ?? $orderEntry['packer_assigned_user_id'] ?? $globalUserId;
+                /*
+                |--------------------------------------------------------------------------
+                | Resolve Packer
+                |--------------------------------------------------------------------------
+                */
+                $entryUserId = $orderEntry['packer_id'] ?? $globalUserId;
+
                 if ($entryUserId && is_numeric($entryUserId)) {
                     $entryUserId = (int) $entryUserId;
                 }
 
-                $entryDbUser = $entryUserId ? \App\Models\User::find($entryUserId) : null;
-                $entryUserName = $orderEntry['packer_name']
-                    ?? $orderEntry['user_name']
-                    ?? $orderEntry['packer_assigned_user_name']
-                    ?? ($entryDbUser ? $entryDbUser->name : $globalUserName);
+                $entryDbUser = $entryUserId
+                    ? \App\Models\User::find($entryUserId)
+                    : null;
 
-                if (!$entryUserId && $entryUserName) {
-                    $foundUser = \App\Models\User::where('name', 'like', "%{$entryUserName}%")->first();
-                    if ($foundUser) {
-                        $entryUserId = $foundUser->id;
-                        $entryUserName = $foundUser->name;
-                    }
-                }
+                $entryUserName = $orderEntry['packer_name']
+                    ?? ($entryDbUser ? $entryDbUser->name : null)
+                    ?? $globalUserName;
 
                 if (!$entryUserName) {
                     $entryUserName = 'Packer User';
                 }
 
+                /*
+                |--------------------------------------------------------------------------
+                | Find Order
+                |--------------------------------------------------------------------------
+                */
                 $cleanOrderId = ltrim($orderIdRaw, '#');
+
                 $order = Order::with('items')
                     ->where(function ($q) use ($orderIdRaw, $cleanOrderId) {
+
                         $q->where('id', $orderIdRaw)
-                          ->orWhere('order_number', $orderIdRaw)
-                          ->orWhere('order_number', $cleanOrderId)
-                          ->orWhere('order_number', '#' . $cleanOrderId);
+                            ->orWhere('order_number', $orderIdRaw)
+                            ->orWhere('order_number', $cleanOrderId)
+                            ->orWhere('order_number', '#' . $cleanOrderId);
                     })
                     ->first();
 
+                /*
+                |--------------------------------------------------------------------------
+                | Try Shopify Sync If Order Not Found
+                |--------------------------------------------------------------------------
+                */
                 if (!$order) {
+
                     try {
+
                         $this->shopifyService->syncOrdersToDatabase();
+
                         $order = Order::with('items')
-                            ->where(function ($q) use ($orderIdRaw, $cleanOrderId) {
+                            ->where(function ($q) use (
+                                $orderIdRaw,
+                                $cleanOrderId
+                            ) {
+
                                 $q->where('id', $orderIdRaw)
-                                  ->orWhere('order_number', $orderIdRaw)
-                                  ->orWhere('order_number', $cleanOrderId)
-                                  ->orWhere('order_number', '#' . $cleanOrderId);
+                                    ->orWhere('order_number', $orderIdRaw)
+                                    ->orWhere('order_number', $cleanOrderId)
+                                    ->orWhere('order_number', '#' . $cleanOrderId);
                             })
                             ->first();
+
                     } catch (\Exception $e) {
-                        // Continue if offline
+
+                        \Log::warning(
+                            'Shopify sync failed while assigning packer',
+                            [
+                                'order_id' => $orderIdRaw,
+                                'error' => $e->getMessage(),
+                            ]
+                        );
                     }
                 }
 
+                /*
+                |--------------------------------------------------------------------------
+                | Order Not Found
+                |--------------------------------------------------------------------------
+                */
                 if (!$order) {
-                    if (count($ordersPayload) === 1) {
-                        return response()->json([
-                            'success' => false,
-                            'message' => "Order '{$orderIdRaw}' not found in system.",
-                        ], 404);
-                    }
-                    continue;
+
+                    return response()->json([
+                        'success' => false,
+                        'message' => "Order '{$orderIdRaw}' not found in system.",
+                    ], 404);
                 }
 
-                // Extract item identifiers
-                $itemsInput = $orderEntry['order_items']
-                    ?? $orderEntry['order_item_ids']
-                    ?? $orderEntry['items']
-                    ?? $orderEntry['line_item_ids']
-                    ?? [];
+                /*
+                |--------------------------------------------------------------------------
+                | Get Order Items Input
+                |--------------------------------------------------------------------------
+                |
+                | Example:
+                |
+                | "order_items": [
+                |     "16597827420404"
+                | ]
+                |
+                | The value may be:
+                |
+                | 1. Local OrderItem.id
+                | 2. Shopify line_item_id
+                |
+                */
+                $itemsInput = $orderEntry['order_items'] ?? [];
 
-                $parsedIds = $this->extractItemIdentifiers($itemsInput);
-                $itemIds = $parsedIds['item_ids'];
-                $lineItemIds = $parsedIds['line_item_ids'];
+                if (!is_array($itemsInput)) {
+                    $itemsInput = [$itemsInput];
+                }
 
-                $itemsQuery = OrderItem::where('order_id', $order->id);
+                /*
+                |--------------------------------------------------------------------------
+                | Clean Item IDs
+                |--------------------------------------------------------------------------
+                */
+                $itemsInput = collect($itemsInput)
+                    ->filter(function ($value) {
+                        return $value !== null && $value !== '';
+                    })
+                    ->map(function ($value) {
 
-                if (!empty($itemIds) || !empty($lineItemIds)) {
-                    $itemsQuery->where(function ($q) use ($itemIds, $lineItemIds) {
-                        if (!empty($itemIds)) {
-                            $q->orWhereIn('id', $itemIds);
-                        }
-                        if (!empty($lineItemIds)) {
-                            $q->orWhereIn('line_item_id', $lineItemIds);
-                        }
+                        /*
+                        | Handle values such as:
+                        | "16597827420404"
+                        | 16597827420404
+                        | "#16597827420404"
+                        */
+                        return trim(
+                            ltrim((string) $value, '#')
+                        );
+                    })
+                    ->filter(function ($value) {
+                        return $value !== '';
+                    })
+                    ->unique()
+                    ->values()
+                    ->toArray();
+
+                /*
+                |--------------------------------------------------------------------------
+                | Find Order Items
+                |--------------------------------------------------------------------------
+                |
+                | IMPORTANT:
+                |
+                | We directly check BOTH:
+                |
+                | OrderItem.id
+                | OrderItem.line_item_id
+                |
+                | So Shopify line_item_id values work correctly.
+                |
+                */
+                $itemsQuery = OrderItem::where(
+                    'order_id',
+                    $order->id
+                );
+
+                /*
+                |--------------------------------------------------------------------------
+                | If Specific Items Were Supplied
+                |--------------------------------------------------------------------------
+                */
+                if (!empty($itemsInput)) {
+
+                    $itemsQuery->where(function ($q) use ($itemsInput) {
+
+                        /*
+                        | Local OrderItem ID
+                        */
+                        $q->whereIn(
+                            'id',
+                            $itemsInput
+                        );
+
+                        /*
+                        | Shopify Line Item ID
+                        */
+                        $q->orWhereIn(
+                            'line_item_id',
+                            $itemsInput
+                        );
                     });
                 }
 
                 $items = $itemsQuery->get();
 
+                /*
+                |--------------------------------------------------------------------------
+                | No Items Found
+                |--------------------------------------------------------------------------
+                */
                 if ($items->isEmpty()) {
-                    if (count($ordersPayload) === 1) {
-                        return response()->json([
-                            'success' => false,
-                            'message' => 'No matching order items found for this order.',
-                        ], 404);
-                    }
-                    continue;
+
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'No matching order items found for this order.',
+                        'debug' => [
+                            'order_id' => $order->id,
+                            'order_number' => $order->order_number,
+                            'order_items_received' => $itemsInput,
+                        ],
+                    ], 404);
                 }
 
+                /*
+                |--------------------------------------------------------------------------
+                | Assign Items To Packer
+                |--------------------------------------------------------------------------
+                */
                 $assignedItems = collect();
+
                 $oldOrderStatus = $order->status;
+
                 $nowTimestamp = now();
 
                 foreach ($items as $item) {
+
                     $oldItemStatus = $item->status;
 
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Assign Packer To Order Item
+                    |--------------------------------------------------------------------------
+                    */
                     $item->update([
                         'packed_by' => $entryUserId,
                         'packed_user_name' => $entryUserName,
                         'packed_at' => $nowTimestamp,
                     ]);
 
-                    $assignedItems->push($item->fresh());
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Refresh Item
+                    |--------------------------------------------------------------------------
+                    */
+                    $freshItem = $item->fresh();
 
+                    $assignedItems->push(
+                        $freshItem
+                    );
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | Item Assignment Log
+                    |--------------------------------------------------------------------------
+                    */
                     OrderStatusLog::create([
                         'order_id' => $order->id,
                         'order_item_id' => $item->id,
@@ -1928,20 +2074,30 @@ class PackerManagementController extends Controller
                         'action' => 'item_assigned_to_packer',
                         'old_status' => $oldItemStatus,
                         'new_status' => $oldItemStatus,
-                        'notes' => $request->input('notes', "Assigned item {$item->product_name} to packer {$entryUserName}"),
+                        'notes' => "Assigned item {$item->product_name} to packer {$entryUserName}",
                     ]);
                 }
 
-                // Update order packed_by, packed_user_name, packed_at
+                /*
+                |--------------------------------------------------------------------------
+                | Update Order Packer Details
+                |--------------------------------------------------------------------------
+                */
                 $order->update([
                     'packed_by' => $entryUserId,
                     'packed_user_name' => $entryUserName,
                     'packed_at' => $nowTimestamp,
                 ]);
 
-                // Also update OrderPackerAssigned table for compatibility
+                /*
+                |--------------------------------------------------------------------------
+                | Update OrderPackerAssigned
+                |--------------------------------------------------------------------------
+                */
                 OrderPackerAssigned::updateOrCreate(
-                    ['order_id' => $order->id],
+                    [
+                        'order_id' => $order->id,
+                    ],
                     [
                         'packer_assigned_user_id' => $entryUserId,
                         'packer_assigned_user_name' => $entryUserName,
@@ -1949,10 +2105,31 @@ class PackerManagementController extends Controller
                     ]
                 );
 
-                if (in_array($order->status, ['picked', 'picking'])) {
-                    $order->update(['status' => 'packing']);
+                /*
+                |--------------------------------------------------------------------------
+                | Update Order Status
+                |--------------------------------------------------------------------------
+                */
+                if (in_array($order->status, [
+                    'picked',
+                    'picking'
+                ])) {
+
+                    $order->update([
+                        'status' => 'packing',
+                    ]);
+
+                    /*
+                    | Refresh order so response contains new status
+                    */
+                    $order->refresh();
                 }
 
+                /*
+                |--------------------------------------------------------------------------
+                | Order Assignment Log
+                |--------------------------------------------------------------------------
+                */
                 OrderStatusLog::create([
                     'order_id' => $order->id,
                     'user_id' => $entryUserId,
@@ -1960,40 +2137,77 @@ class PackerManagementController extends Controller
                     'action' => 'packer_assigned_to_order',
                     'old_status' => $oldOrderStatus,
                     'new_status' => $order->status,
-                    'notes' => $request->input('notes', "Assigned order {$order->order_number} to packer {$entryUserName} with {$assignedItems->count()} item(s)"),
+                    'notes' => "Assigned order {$order->order_number} to packer {$entryUserName} with {$assignedItems->count()} item(s)",
                 ]);
 
-                $totalAssignedItemsCount += $assignedItems->count();
+                /*
+                |--------------------------------------------------------------------------
+                | Count Assigned Items
+                |--------------------------------------------------------------------------
+                */
+                $totalAssignedItemsCount +=
+                    $assignedItems->count();
 
+                /*
+                |--------------------------------------------------------------------------
+                | Response Order
+                |--------------------------------------------------------------------------
+                */
                 $processedOrders[] = [
                     'order_id' => $order->id,
+
                     'order_number' => $order->order_number,
+
                     'old_status' => $oldOrderStatus,
+
                     'new_status' => $order->status,
+
                     'packed_by' => $order->packed_by,
+
                     'packed_user_name' => $order->packed_user_name,
-                    'packed_at' => $order->packed_at ? $order->packed_at->toIso8601String() : null,
-                    'assigned_items_count' => $assignedItems->count(),
-                    'assigned_items' => $assignedItems,
+
+                    'packed_at' => $order->packed_at
+                        ? $order->packed_at->toIso8601String()
+                        : null,
+
+                    'assigned_items_count' =>
+                        $assignedItems->count(),
+
+                    'assigned_items' =>
+                        $assignedItems,
                 ];
             }
 
+            /*
+            |--------------------------------------------------------------------------
+            | Final Response
+            |--------------------------------------------------------------------------
+            */
             return response()->json([
                 'success' => true,
-                'message' => "Order(s) successfully assigned to packer with order items.",
+
+                'message' =>
+                    'Order successfully assigned to packer with order items.',
+
                 'data' => [
+
                     'packer' => [
                         'id' => $globalUserId,
                         'name' => $globalUserName,
                     ],
-                    'assigned_orders_count' => count($processedOrders),
-                    'total_assigned_items_count' => $totalAssignedItemsCount,
-                    'orders' => $processedOrders,
+
+                    'assigned_orders_count' =>
+                        count($processedOrders),
+
+                    'total_assigned_items_count' =>
+                        $totalAssignedItemsCount,
+
+                    'orders' =>
+                        $processedOrders,
                 ],
             ]);
         });
     }
-
     /**
      * Unassign an order with order items (in array) which is assigned to packer.
      * Route: POST /api/orders/unassign-packer-items

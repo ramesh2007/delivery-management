@@ -126,6 +126,14 @@ class Order extends Model
     {
         return $this->hasMany(OrderReturnReplacement::class, 'order_id')->orderBy('created_at', 'desc');
     }
+
+    /**
+     * Get technician schedules for this order.
+     */
+    public function technicianSchedules(): HasMany
+    {
+        return $this->hasMany(TechnicianScheduled::class, 'order_id');
+    }
 }
 
 

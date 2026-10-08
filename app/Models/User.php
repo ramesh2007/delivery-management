@@ -98,5 +98,13 @@ class User extends Authenticatable
     {
         return $this->hasMany(OrderDriverAssigned::class, 'assigned_driver_user_id');
     }
+
+    /**
+     * Get the technician schedules assigned to this user.
+     */
+    public function technicianSchedules()
+    {
+        return $this->hasMany(TechnicianScheduled::class, 'technician_id');
+    }
 }
 

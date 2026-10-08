@@ -18,7 +18,7 @@ use App\Http\Controllers\Api\Admin\ScheduledInstallationController;
 use App\Http\Controllers\Api\Admin\InstallationLevelController;
 use App\Http\Controllers\Api\Admin\FlagController;
 use App\Http\Controllers\Api\Admin\ReturnReplacementController;
-
+use App\Http\Controllers\Api\Admin\ScheduleTechnicianController;
 
 //Mobile App Controllers
 use App\Http\Controllers\Api\OrderManagementController;
@@ -27,7 +27,7 @@ use App\Http\Controllers\Api\Mobile\PickerManagementController;
 use App\Http\Controllers\Api\Mobile\DeliveryManagementController;
 use App\Http\Controllers\Api\Mobile\DiscrepancyController;
 use App\Http\Controllers\Api\Mobile\ScheduledInstallationMobileController;
-
+use App\Http\Controllers\Api\Mobile\DashboardController;
 
 Route::post('/login', [AuthController::class, 'login']);
 Route::post('/users', [UserController::class, 'store']); // Public registration
@@ -37,6 +37,8 @@ Route::match(['get', 'post'], '/orders/status/installation', [OrderStatusApiCont
 Route::match(['get', 'post'], '/orders/installation', [OrderStatusApiController::class, 'installationOrders']);
 Route::match(['get', 'post'], '/orders/status/scheduled-items', [ScheduleController::class, 'scheduledItems']);
 Route::match(['get', 'post'], '/orders/scheduled-items', [ScheduleController::class, 'scheduledItems']);
+Route::any('/check-technician-avaliablity', [ScheduleTechnicianController::class, 'checkTechnicianAvaliable']);
+Route::any('/check-technician-availability', [ScheduleTechnicianController::class, 'checkTechnicianAvaliable']);
 
 //Admin Routes
 Route::prefix('admin')->group(function(){
@@ -90,8 +92,11 @@ Route::prefix('admin')->group(function(){
     Route::any('/assign-items-by-picker', [PickerAdminController::class, 'assignItemsByPicker']);
     Route::any('/orders/unassign-picker-items',[PickerAdminController::class,'unassignItemsByPicker']);
     Route::any('/orders/assign-order-wise-picker',[PickerAdminController::class,'assignOrderWithItems']);
+    Route::post('/orders/order-wise-picker-unassign', [PickerAdminController::class, 'unassignOrderWithItems']);
+
     //Packers
     Route::get('/get-packers-list', [PackerAdminController::class, 'getPackersList']);
+    Route::post('/orders/assign-packer-items', [PackerAdminController::class, 'assignPackerWithItems']);
 
     // Payment Status Update Endpoint
     Route::post('/orders/update-payment-status', [PaymentsManagementController::class, 'updatePaymentStatus']);
@@ -115,7 +120,9 @@ Route::prefix('admin')->group(function(){
     // Installation Level - Locations & Teams (Technicians)
     Route::get('/installation/locations', [InstallationLevelController::class, 'locations']);
     Route::get('/installation/teams/{LocationId?}', [InstallationLevelController::class, 'team']);
-
+    Route::any('/check-technician-avaliablity', [ScheduleTechnicianController::class, 'checkTechnicianAvaliable']);
+    Route::match(['get', 'post'], '/technician-schedule/create', [ScheduleTechnicianController::class, 'createSchedule']);
+    Route::get('/technician-schedule/list', [ScheduleTechnicianController::class, 'listSchedules']);
 
     // Flagged Orders Management Endpoints
 
@@ -149,10 +156,6 @@ Route::prefix('mobile')->group(function(){
     Route::post('/orders/picker/assign-items', [PickerManagementController::class, 'assignOrderWithItems']);
     Route::post('/orders/assign-with-items', [PickerManagementController::class, 'assignOrderWithItems']);
 
-    Route::post('/orders/unassign-picker-items', [PickerManagementController::class, 'unassignOrderWithItems']);
-    Route::post('/orders/picker/unassign-items', [PickerManagementController::class, 'unassignOrderWithItems']);
-    Route::post('/orders/unassign-with-items', [PickerManagementController::class, 'unassignOrderWithItems']);
-
     // Packer Workflow API Endpoints (Assignment, Barcode Verification, Bag Count & Order Lists)
     Route::get('/orders/packer/ready-to-pack', [PackerManagementController::class, 'getPickedOrdersForPacker']);
     Route::get('/orders/packer/picked/{user_id?}', [PackerManagementController::class, 'getPickedOrdersForPacker']);
@@ -170,9 +173,6 @@ Route::prefix('mobile')->group(function(){
     Route::post('/orders/packer/unassign-me', [PackerManagementController::class, 'unassignPacker']);
     Route::post('/orders/packer/unassign', [PackerManagementController::class, 'unassignPacker']);
 
-    Route::post('/orders/assign-packer-items', [PackerManagementController::class, 'assignPackerWithItems']);
-    Route::post('/orders/packer/assign-items', [PackerManagementController::class, 'assignPackerWithItems']);
-    Route::post('/orders/assign-packer-with-items', [PackerManagementController::class, 'assignPackerWithItems']);
 
     Route::post('/orders/unassign-packer-items', [PackerManagementController::class, 'unassignPackerWithItems']);
     Route::post('/orders/packer/unassign-items', [PackerManagementController::class, 'unassignPackerWithItems']);
@@ -230,6 +230,12 @@ Route::prefix('mobile')->group(function(){
     Route::match(['get', 'post'], 'scheduled/completed/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getCompletedInstallationsByInstallerUserId']);
     Route::match(['get', 'post'], 'scheduled/update-status/{id?}', [ScheduledInstallationMobileController::class, 'updateStatus']);
     Route::match(['get', 'post'], 'scheduled/installed-proof-upload', [ScheduledInstallationMobileController::class, 'InstalledProofimageupload']);
+
+    //Mobile Dashboard Endpoints
+    Route::match(['get', 'post'], '/picker/dashboard/{picker_id?}', [DashboardController::class, 'pickerDashboard']);
+    Route::match(['get', 'post'], '/packer/dashboard/{packer_id?}', [DashboardController::class, 'packerDashboard']);
+    Route::match(['get', 'post'], '/driver/dashboard/{driver_id?}', [DashboardController::class, 'driverDashboard']);
+    Route::match(['get', 'post'], '/installer/dashboard/{installer_id?}', [DashboardController::class, 'installationDashboard']);
 });
 
 

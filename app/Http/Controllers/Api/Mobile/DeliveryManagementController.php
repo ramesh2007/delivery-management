@@ -9,6 +9,8 @@ use App\Models\OrderItem;
 use App\Models\OrderDriverAssigned;
 use App\Models\OrderItemDiscrepancy;
 use App\Models\OrderStatusLog;
+use App\Models\OrderPayment;
+use App\Services\ShopifyService;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Auth;
@@ -17,7 +19,63 @@ use Exception;
 
 class DeliveryManagementController extends Controller
 {
- 
+    protected ShopifyService $shopifyService;
+
+    public function __construct(?ShopifyService $shopifyService = null)
+    {
+        $this->shopifyService = $shopifyService ?? app(ShopifyService::class);
+    }
+
+    /**
+     * Sync latest payment status and payment type/gateway directly from Shopify API.
+     */
+    protected function syncOrderPaymentFromShopify(Order $order): ?OrderPayment
+    {
+        try {
+            $shopifyOrder = null;
+            $order->loadMissing('payment');
+            $shopifyOrderId = $order->payment?->shopify_order_id;
+
+            // 1. If we have shopify_order_id, fetch directly by ID
+            if (!empty($shopifyOrderId)) {
+                $res = $this->shopifyService->getOrder($shopifyOrderId);
+                if (!empty($res['success']) && !empty($res['order'])) {
+                    $shopifyOrder = $res['order'];
+                }
+            }
+
+            // 2. If not found by ID or no ID, search Shopify by order number / name
+            if (!$shopifyOrder && !empty($order->order_number)) {
+                $cleanName = ltrim($order->order_number, '#');
+                $res = $this->shopifyService->getOrders(null, null, ['name' => $cleanName]);
+                if (!empty($res['success']) && !empty($res['orders'])) {
+                    foreach ($res['orders'] as $candidate) {
+                        $candidateName = $candidate['name'] ?? '';
+                        $candidateClean = ltrim($candidateName, '#');
+                        if ($candidateClean === $cleanName || (string) ($candidate['order_number'] ?? '') === $cleanName) {
+                            $shopifyOrder = $candidate;
+                            break;
+                        }
+                    }
+                    if (!$shopifyOrder && count($res['orders']) > 0) {
+                        $shopifyOrder = $res['orders'][0];
+                    }
+                }
+            }
+
+            // 3. If Shopify order found, sync payment into database
+            if ($shopifyOrder) {
+                $orderPayment = $this->shopifyService->syncOrderPayment($order, $shopifyOrder);
+                $order->refresh();
+                return $orderPayment;
+            }
+        } catch (\Throwable $e) {
+            Log::warning("Could not sync live payment from Shopify for order {$order->order_number}: " . $e->getMessage());
+        }
+
+        return $order->payment;
+    }
+
     /**
      * Get list of assigned driver orders / assignments.
      * Route: POST /api/orders/driver/assigned
@@ -56,8 +114,8 @@ class DeliveryManagementController extends Controller
             if (!empty($search)) {
                 $query->where(function ($q) use ($search) {
                     $q->where('order_number', 'like', "%{$search}%")
-                      ->orWhere('driver_name', 'like', "%{$search}%")
-                      ->orWhere('zone', 'like', "%{$search}%");
+                        ->orWhere('driver_name', 'like', "%{$search}%")
+                        ->orWhere('zone', 'like', "%{$search}%");
                 });
             }
 
@@ -173,7 +231,7 @@ class DeliveryManagementController extends Controller
                 $numOrIdStr = trim((string) $numOrId);
                 $cleanNum = ltrim($numOrIdStr, '#');
 
-                $order = Order::with('items')
+                $order = Order::with(['items', 'payment'])
                     ->where('order_number', $numOrIdStr)
                     ->orWhere('order_number', $cleanNum)
                     ->orWhere('order_number', '#' . $cleanNum)
@@ -186,6 +244,9 @@ class DeliveryManagementController extends Controller
                         'message' => "Order '{$numOrIdStr}' not found.",
                     ], 404);
                 }
+
+                // Sync latest payment status and payment type directly from Shopify
+                $this->syncOrderPaymentFromShopify($order);
 
                 // Check if all items in this order are packer verified
                 $unverifiedItems = $order->items->filter(function ($item) {
@@ -284,19 +345,19 @@ class DeliveryManagementController extends Controller
             $assignmentId = $request->input('assignment_id') ?? ($rawJson['assignment_id'] ?? null);
 
             // Payment & Delivery inputs
-            $paymentMethod = $request->input('payment_method') 
-                ?? ($rawJson['payment_method'] ?? null) 
-                ?? $request->input('payment_type') 
+            $paymentMethod = $request->input('payment_method')
+                ?? ($rawJson['payment_method'] ?? null)
+                ?? $request->input('payment_type')
                 ?? ($rawJson['payment_type'] ?? 'cash');
 
-            $paymentStatus = $request->input('payment_status') 
+            $paymentStatus = $request->input('payment_status')
                 ?? ($rawJson['payment_status'] ?? 'paid');
 
-            $amountInput = $request->input('amount') 
-                ?? ($rawJson['amount'] ?? null) 
-                ?? $request->input('collected_amount') 
-                ?? ($rawJson['collected_amount'] ?? null) 
-                ?? $request->input('total_amount') 
+            $amountInput = $request->input('amount')
+                ?? ($rawJson['amount'] ?? null)
+                ?? $request->input('collected_amount')
+                ?? ($rawJson['collected_amount'] ?? null)
+                ?? $request->input('total_amount')
                 ?? ($rawJson['total_amount'] ?? null);
 
             $notes = $request->input('notes') ?? ($rawJson['notes'] ?? null);
@@ -377,8 +438,12 @@ class DeliveryManagementController extends Controller
                 'collected_amount' => $collectedAmount,
             ]);
 
-            // 3. Update Order Line Items to Delivered
+            // 3. Update Order Line Items to Delivered (exclude cancelled items)
             foreach ($order->items as $item) {
+                if ($item->status === 'cancelled') {
+                    continue;
+                }
+
                 $item->update([
                     'status' => 'delivered',
                     'delivered_by' => $driverUserId,
@@ -459,18 +524,18 @@ class DeliveryManagementController extends Controller
             $lineItemId = $request->input('line_item_id') ?? ($rawJson['line_item_id'] ?? null);
 
             $reason = strtolower(trim((string) (
-                $request->input('reason') 
-                ?? ($rawJson['reason'] ?? null) 
-                ?? $request->input('issue_type') 
-                ?? ($rawJson['issue_type'] ?? null) 
-                ?? $request->input('flag_reason') 
+                $request->input('reason')
+                ?? ($rawJson['reason'] ?? null)
+                ?? $request->input('issue_type')
+                ?? ($rawJson['issue_type'] ?? null)
+                ?? $request->input('flag_reason')
                 ?? ($rawJson['flag_reason'] ?? 'damaged')
             )));
 
             $comment = trim((string) (
-                $request->input('comment') 
-                ?? ($rawJson['comment'] ?? null) 
-                ?? $request->input('notes') 
+                $request->input('comment')
+                ?? ($rawJson['comment'] ?? null)
+                ?? $request->input('notes')
                 ?? ($rawJson['notes'] ?? '')
             ));
 
@@ -655,8 +720,8 @@ class DeliveryManagementController extends Controller
     public function getDeliveryDiscrepancies(Request $request, $driver_user_id = null): JsonResponse
     {
         try {
-            $driverId = $driver_user_id 
-                ?? $request->input('driver_user_id') 
+            $driverId = $driver_user_id
+                ?? $request->input('driver_user_id')
                 ?? $request->query('driver_user_id');
 
             $query = OrderItemDiscrepancy::with(['order.items', 'orderItem', 'user']);
@@ -720,22 +785,22 @@ class DeliveryManagementController extends Controller
     public function getFlaggedOrders(Request $request, $driver_user_id = null): JsonResponse
     {
         try {
-            $driverId = $driver_user_id 
-                ?? $request->input('driver_user_id') 
-                ?? $request->input('assigned_driver_user_id') 
-                ?? $request->query('driver_user_id') 
+            $driverId = $driver_user_id
+                ?? $request->input('driver_user_id')
+                ?? $request->input('assigned_driver_user_id')
+                ?? $request->query('driver_user_id')
                 ?? $request->query('assigned_driver_user_id');
 
             $query = OrderDriverAssigned::with(['order.items', 'driver'])
                 ->where(function ($q) {
                     $q->where('driver_status', 'flagged')
-                      ->orWhere('order_status', 'flagged')
-                      ->orWhereHas('order', function ($oq) {
-                          $oq->where('status', 'flagged')
-                            ->orWhereHas('items', function ($iq) {
-                                $iq->where('is_flagged', true);
-                            });
-                      });
+                        ->orWhere('order_status', 'flagged')
+                        ->orWhereHas('order', function ($oq) {
+                            $oq->where('status', 'flagged')
+                                ->orWhereHas('items', function ($iq) {
+                                    $iq->where('is_flagged', true);
+                                });
+                        });
                 });
 
             if (!empty($driverId)) {
@@ -873,7 +938,7 @@ class DeliveryManagementController extends Controller
             }
 
             $query = OrderDriverAssigned::where('assigned_driver_user_id', $driver_user_id)
-                ->with(['order.items']);
+                ->with(['order.items', 'order.payment']);
 
             if ($request->has('driver_status')) {
                 $query->where('driver_status', $request->query('driver_status'));
@@ -883,6 +948,23 @@ class DeliveryManagementController extends Controller
 
             $formattedAssignments = $assignments->map(function ($assignment) {
                 $order = $assignment->order;
+                if ($order) {
+                    $order->loadMissing('payment');
+                }
+
+                $paymentStatus = $assignment->payment_status
+                    ?: ($order?->payment?->payment_status ?: ($order?->payment_status ?: 'pending'));
+                $paymentType = $assignment->payment_method
+                    ?: ($order?->payment?->payment_method ?: ($order?->payment_method ?: 'N/A'));
+                $totalAmount = $order ? (float) ($order->payment?->total_price ?: $order->total_amount) : 0.00;
+                $paidAmount = $order && $order->payment
+                    ? (float) $order->payment->paid_amount
+                    : ($order ? (float) ($order->collected_amount ?? 0.00) : 0.00);
+                $totalOutstanding = $order && $order->payment
+                    ? (float) $order->payment->total_outstanding
+                    : max(0.00, $totalAmount - $paidAmount);
+                $currency = $order?->payment?->currency ?: 'QAR';
+
                 $bagCount = $order ? (int) ($order->bag_count ?? 0) : 0;
                 $itemsCount = $order && $order->items ? $order->items->count() : 0;
 
@@ -895,6 +977,15 @@ class DeliveryManagementController extends Controller
                     'zone' => $assignment->zone,
                     'order_status' => $assignment->order_status,
                     'driver_status' => $assignment->driver_status,
+                    'payment_status' => $paymentStatus,
+                    'payment_type' => $paymentType,
+                    'payment_method' => $paymentType,
+                    'total_amount' => $totalAmount,
+                    'paid_amount' => $paidAmount,
+                    'collected_amount' => $paidAmount,
+                    'total_outstanding' => $totalOutstanding,
+                    'outstanding_amount' => $totalOutstanding,
+                    'currency' => $currency,
                     'bag_count' => $bagCount,
                     'items_count' => $itemsCount,
                     'total_items' => $itemsCount,
@@ -913,7 +1004,15 @@ class DeliveryManagementController extends Controller
                         'customer_name' => $order->customer_name ?? 'N/A',
                         'customer_phone' => $order->customer_phone ?? 'N/A',
                         'delivery_address' => $order->delivery_address ?? 'N/A',
-                        'total_amount' => (float) $order->total_amount,
+                        'total_amount' => $totalAmount,
+                        'payment_status' => $paymentStatus,
+                        'payment_type' => $paymentType,
+                        'payment_method' => $paymentType,
+                        'paid_amount' => $paidAmount,
+                        'collected_amount' => $paidAmount,
+                        'total_outstanding' => $totalOutstanding,
+                        'outstanding_amount' => $totalOutstanding,
+                        'currency' => $currency,
                         'status' => $order->status,
                         'bag_count' => $bagCount,
                         'items_count' => $itemsCount,
@@ -961,13 +1060,13 @@ class DeliveryManagementController extends Controller
     public function getStartedOrders(Request $request, $driver_user_id = null): JsonResponse
     {
         try {
-            $driverId = $driver_user_id 
-                ?? $request->input('driver_user_id') 
-                ?? $request->input('assigned_driver_user_id') 
-                ?? $request->query('driver_user_id') 
+            $driverId = $driver_user_id
+                ?? $request->input('driver_user_id')
+                ?? $request->input('assigned_driver_user_id')
+                ?? $request->query('driver_user_id')
                 ?? $request->query('assigned_driver_user_id');
 
-            $query = OrderDriverAssigned::with(['order.items', 'driver'])
+            $query = OrderDriverAssigned::with(['order.items', 'order.payment', 'driver'])
                 ->where('driver_status', 'started');
 
             if (!empty($driverId)) {
@@ -985,6 +1084,23 @@ class DeliveryManagementController extends Controller
 
             $formattedAssignments = $assignments->map(function ($assignment) {
                 $order = $assignment->order;
+                if ($order) {
+                    $order->loadMissing('payment');
+                }
+
+                $paymentStatus = $assignment->payment_status
+                    ?: ($order?->payment?->payment_status ?: ($order?->payment_status ?: 'pending'));
+                $paymentType = $assignment->payment_method
+                    ?: ($order?->payment?->payment_method ?: ($order?->payment_method ?: 'N/A'));
+                $totalAmount = $order ? (float) ($order->payment?->total_price ?: $order->total_amount) : 0.00;
+                $paidAmount = $order && $order->payment
+                    ? (float) $order->payment->paid_amount
+                    : ($order ? (float) ($order->collected_amount ?? 0.00) : 0.00);
+                $totalOutstanding = $order && $order->payment
+                    ? (float) $order->payment->total_outstanding
+                    : max(0.00, $totalAmount - $paidAmount);
+                $currency = $order?->payment?->currency ?: 'QAR';
+
                 $bagCount = $order ? (int) ($order->bag_count ?? 0) : 0;
                 $itemsCount = $order && $order->items ? $order->items->count() : 0;
 
@@ -997,6 +1113,15 @@ class DeliveryManagementController extends Controller
                     'zone' => $assignment->zone,
                     'order_status' => $assignment->order_status,
                     'driver_status' => $assignment->driver_status,
+                    'payment_status' => $paymentStatus,
+                    'payment_type' => $paymentType,
+                    'payment_method' => $paymentType,
+                    'total_amount' => $totalAmount,
+                    'paid_amount' => $paidAmount,
+                    'collected_amount' => $paidAmount,
+                    'total_outstanding' => $totalOutstanding,
+                    'outstanding_amount' => $totalOutstanding,
+                    'currency' => $currency,
                     'bag_count' => $bagCount,
                     'items_count' => $itemsCount,
                     'total_items' => $itemsCount,
@@ -1012,7 +1137,15 @@ class DeliveryManagementController extends Controller
                         'customer_name' => $order->customer_name ?? 'N/A',
                         'customer_phone' => $order->customer_phone ?? 'N/A',
                         'delivery_address' => $order->delivery_address ?? 'N/A',
-                        'total_amount' => (float) $order->total_amount,
+                        'total_amount' => $totalAmount,
+                        'payment_status' => $paymentStatus,
+                        'payment_type' => $paymentType,
+                        'payment_method' => $paymentType,
+                        'paid_amount' => $paidAmount,
+                        'collected_amount' => $paidAmount,
+                        'total_outstanding' => $totalOutstanding,
+                        'outstanding_amount' => $totalOutstanding,
+                        'currency' => $currency,
                         'status' => $order->status,
                         'bag_count' => $bagCount,
                         'items_count' => $itemsCount,
@@ -1170,14 +1303,34 @@ class DeliveryManagementController extends Controller
             }
 
             // Sync main order status & delivery fields
-            $order = Order::find($assignment->order_id);
+            $order = Order::with('payment')->find($assignment->order_id);
             $oldOrderStatus = $order ? $order->status : null;
             if ($order) {
+                // Keep payment fields on assignment in sync with order / Shopify
+                if ($order->payment) {
+                    $assignment->payment_method = $order->payment->payment_method ?: ($order->payment_method ?: $assignment->payment_method);
+                    $assignment->payment_status = $order->payment->payment_status ?: ($order->payment_status ?: $assignment->payment_status);
+                    $assignment->collected_amount = $order->payment->paid_amount ?: ($order->collected_amount ?: $assignment->collected_amount);
+                } elseif ($order->payment_method || $order->payment_status) {
+                    $assignment->payment_method = $order->payment_method ?: $assignment->payment_method;
+                    $assignment->payment_status = $order->payment_status ?: $assignment->payment_status;
+                    $assignment->collected_amount = $order->collected_amount ?: $assignment->collected_amount;
+                }
+
                 if ($targetDriverStatus === 'delivered') {
                     $order->status = 'delivered';
                     $order->delivered_by = $assignment->assigned_driver_user_id;
                     $order->delivered_user_name = $assignment->driver_name;
                     $order->delivered_at = now();
+
+                    OrderItem::where('order_id', $order->id)
+                        ->where('status', '!=', 'cancelled')
+                        ->update([
+                            'status' => 'delivered',
+                            'delivered_by' => $assignment->assigned_driver_user_id,
+                            'delivered_user_name' => $assignment->driver_name,
+                            'delivered_at' => now(),
+                        ]);
                 } elseif ($targetDriverStatus === 'cancelled') {
                     $order->status = 'cancelled';
                 } elseif ($targetDriverStatus === 'refund') {
@@ -1207,7 +1360,7 @@ class DeliveryManagementController extends Controller
                 'notes' => "Driver status updated to '{$targetDriverStatus}'" . (!empty($notes) ? ": {$notes}" : ""),
             ]);
 
-            $loadedAssignment = $assignment->load(['order.items', 'driver']);
+            $loadedAssignment = $assignment->load(['order.items', 'order.payment', 'driver']);
 
             return response()->json([
                 'status' => 'success',
@@ -1230,6 +1383,23 @@ class DeliveryManagementController extends Controller
     protected function formatAssignmentData(OrderDriverAssigned $assignment): array
     {
         $order = $assignment->order;
+        if ($order) {
+            $order->loadMissing('payment');
+        }
+
+        $paymentStatus = $assignment->payment_status
+            ?: ($order?->payment?->payment_status ?: ($order?->payment_status ?: 'pending'));
+        $paymentType = $assignment->payment_method
+            ?: ($order?->payment?->payment_method ?: ($order?->payment_method ?: 'N/A'));
+        $totalAmount = $order ? (float) ($order->payment?->total_price ?: $order->total_amount) : 0.00;
+        $paidAmount = $order && $order->payment
+            ? (float) $order->payment->paid_amount
+            : ($order ? (float) ($order->collected_amount ?? 0.00) : 0.00);
+        $totalOutstanding = $order && $order->payment
+            ? (float) $order->payment->total_outstanding
+            : max(0.00, $totalAmount - $paidAmount);
+        $currency = $order?->payment?->currency ?: 'QAR';
+
         $bagCount = $order ? (int) ($order->bag_count ?? 0) : 0;
         $itemsCount = $order && $order->items ? $order->items->count() : 0;
         $totalItems = $itemsCount;
@@ -1247,6 +1417,15 @@ class DeliveryManagementController extends Controller
             'zone' => $assignment->zone,
             'order_status' => $assignment->order_status,
             'driver_status' => $assignment->driver_status,
+            'payment_status' => $paymentStatus,
+            'payment_type' => $paymentType,
+            'payment_method' => $paymentType,
+            'total_amount' => $totalAmount,
+            'paid_amount' => $paidAmount,
+            'collected_amount' => $paidAmount,
+            'total_outstanding' => $totalOutstanding,
+            'outstanding_amount' => $totalOutstanding,
+            'currency' => $currency,
             'bag_count' => $bagCount,
             'items_count' => $itemsCount,
             'total_items' => $totalItems,
@@ -1282,7 +1461,15 @@ class DeliveryManagementController extends Controller
             'customer_name' => $order->customer_name ?? 'N/A',
             'customer_phone' => $order->customer_phone ?? 'N/A',
             'delivery_address' => $order->delivery_address ?? 'N/A',
-            'total_amount' => (float) $order->total_amount,
+            'total_amount' => $totalAmount,
+            'payment_status' => $paymentStatus,
+            'payment_type' => $paymentType,
+            'payment_method' => $paymentType,
+            'paid_amount' => $paidAmount,
+            'collected_amount' => $paidAmount,
+            'total_outstanding' => $totalOutstanding,
+            'outstanding_amount' => $totalOutstanding,
+            'currency' => $currency,
             'status' => $order->status,
             'bag_count' => $bagCount,
             'items_count' => $itemsCount,
@@ -1412,7 +1599,7 @@ class DeliveryManagementController extends Controller
 
         return response()->json([
             'success' => true,
-            'message' => $isAllVerified 
+            'message' => $isAllVerified
                 ? "All {$totalItems} item(s) in Order {$order->order_number} are verified. Bag verification complete."
                 : "{$verifiedItemsCount} of {$totalItems} item(s) verified for Order {$order->order_number}.",
             'data' => [
@@ -1445,4 +1632,453 @@ class DeliveryManagementController extends Controller
             ],
         ]);
     }
+
+    /**
+     * Handle Partially Cancelled Orders.
+     * Cancels specific item(s) from an order while driver is on the way,
+     * recalculates remaining order total, logs discrepancy/audit,
+     * notifies the driver, and ensures cancelled items cannot be delivered.
+     *
+     * Route: GET /api/mobile/driver/partially-cancelled
+     * Route: POST /api/mobile/driver/partially-cancelled
+     * Route: POST /api/orders/driver/partially-cancelled
+     */
+    public function PartiallyCancelledOrder(Request $request): JsonResponse
+    {
+        try {
+            $rawJson = json_decode($request->getContent(), true) ?? [];
+
+            $orderNumberRaw = $request->input('order_number')
+                ?? ($rawJson['order_number'] ?? null);
+            if (is_array($orderNumberRaw)) {
+                $orderNumberRaw = $orderNumberRaw[0] ?? '';
+            }
+            $orderNumber = !empty($orderNumberRaw) ? trim((string) $orderNumberRaw) : null;
+            $orderId = $request->input('order_id')
+                ?? ($rawJson['order_id'] ?? null);
+
+            $driverUserId = $request->input('driver_user_id')
+                ?? ($rawJson['driver_user_id'] ?? null)
+                ?? $request->input('driver_id')
+                ?? ($rawJson['driver_id'] ?? null)
+                ?? auth()->id();
+
+            // Extract cancelled items identifiers
+            $requestedLineItemIds = [];
+            $requestedItemIds = [];
+            $requestedBarcodes = [];
+
+            // 1. Array of items e.g. cancelled_items = [ {...}, {...} ] or [ "id1", "id2" ]
+            $cancelledItemsInput = $request->input('cancelled_items')
+                ?? ($rawJson['cancelled_items'] ?? null)
+                ?? $request->input('items')
+                ?? ($rawJson['items'] ?? null);
+
+            if (is_array($cancelledItemsInput)) {
+                foreach ($cancelledItemsInput as $entry) {
+                    if (is_array($entry)) {
+                        if (!empty($entry['line_item_id'])) {
+                            $requestedLineItemIds[] = (string) $entry['line_item_id'];
+                        }
+                        if (!empty($entry['item_id'])) {
+                            $requestedItemIds[] = $entry['item_id'];
+                        } elseif (!empty($entry['id'])) {
+                            $requestedItemIds[] = $entry['id'];
+                        }
+                        if (!empty($entry['barcode'])) {
+                            $requestedBarcodes[] = (string) $entry['barcode'];
+                        }
+                    } else {
+                        $val = trim((string) $entry);
+                        if (is_numeric($val) && strlen($val) > 8) {
+                            $requestedLineItemIds[] = $val;
+                        } elseif (is_numeric($val)) {
+                            $requestedItemIds[] = (int) $val;
+                        } else {
+                            $requestedLineItemIds[] = $val;
+                        }
+                    }
+                }
+            }
+
+            // 2. Direct single/array line_item_id(s)
+            $lineItemId = $request->input('line_item_id') ?? ($rawJson['line_item_id'] ?? null);
+            if (!empty($lineItemId)) {
+                $requestedLineItemIds[] = (string) $lineItemId;
+            }
+            $lineItemIds = $request->input('line_item_ids') ?? ($rawJson['line_item_ids'] ?? null);
+            if (is_array($lineItemIds)) {
+                foreach ($lineItemIds as $lid) {
+                    if (!empty($lid)) {
+                        $requestedLineItemIds[] = (string) $lid;
+                    }
+                }
+            }
+
+            // 3. Direct single/array order_item_id(s)
+            $orderItemId = $request->input('order_item_id')
+                ?? ($rawJson['order_item_id'] ?? null)
+                ?? $request->input('item_id')
+                ?? ($rawJson['item_id'] ?? null);
+            if (!empty($orderItemId)) {
+                $requestedItemIds[] = $orderItemId;
+            }
+            $orderItemIds = $request->input('order_item_ids')
+                ?? ($rawJson['order_item_ids'] ?? null)
+                ?? $request->input('item_ids')
+                ?? ($rawJson['item_ids'] ?? null);
+            if (is_array($orderItemIds)) {
+                foreach ($orderItemIds as $oid) {
+                    if (!empty($oid)) {
+                        $requestedItemIds[] = $oid;
+                    }
+                }
+            }
+
+            $requestedLineItemIds = array_values(array_unique(array_filter($requestedLineItemIds)));
+            $requestedItemIds = array_values(array_unique(array_filter($requestedItemIds)));
+            $requestedBarcodes = array_values(array_unique(array_filter($requestedBarcodes)));
+
+            $reason = trim((string) (
+                $request->input('reason')
+                ?? ($rawJson['reason'] ?? null)
+                ?? $request->input('cancellation_reason')
+                ?? ($rawJson['cancellation_reason'] ?? null)
+                ?? $request->input('comment')
+                ?? ($rawJson['comment'] ?? null)
+                ?? $request->input('notes')
+                ?? ($rawJson['notes'] ?? 'Customer cancelled item(s) while order was out for delivery')
+            ));
+
+            // ========================================================
+            // A. If GET request without cancellation inputs:
+            //    Query partially cancelled orders
+            // ========================================================
+            $hasItemsToCancel = !empty($requestedLineItemIds) || !empty($requestedItemIds) || !empty($requestedBarcodes);
+
+            if ($request->isMethod('get') && !$hasItemsToCancel) {
+                $query = OrderDriverAssigned::with(['order.items', 'order.payment', 'driver'])
+                    ->whereHas('order.items', function ($q) {
+                        $q->where('status', 'cancelled');
+                    });
+
+                if (!empty($orderNumber) || !empty($orderId)) {
+                    $numOrIdStr = trim((string) ($orderNumber ?: $orderId));
+                    $cleanNum = ltrim($numOrIdStr, '#');
+                    $query->where(function ($q) use ($numOrIdStr, $cleanNum) {
+                        $q->where('order_number', $numOrIdStr)
+                            ->orWhere('order_number', $cleanNum)
+                            ->orWhere('order_number', '#' . $cleanNum)
+                            ->orWhere('order_id', $numOrIdStr);
+                    });
+                } elseif (!empty($driverUserId)) {
+                    $query->where('assigned_driver_user_id', $driverUserId);
+                }
+
+                $assignments = $query->orderBy('updated_at', 'desc')->get();
+
+                $results = $assignments->map(function ($assignment) {
+                    $order = $assignment->order;
+                    $allItems = $order ? $order->items : collect();
+                    $cancelledItems = $allItems->where('status', 'cancelled');
+                    $remainingItems = $allItems->where('status', '!=', 'cancelled');
+
+                    return [
+                        'order_id' => $assignment->order_id,
+                        'order_number' => $assignment->order_number,
+                        'driver_status' => $assignment->driver_status,
+                        'order_status' => $assignment->order_status,
+                        'total_amount' => (float) ($order ? $order->total_amount : 0.00),
+                        'cancelled_items_count' => $cancelledItems->count(),
+                        'remaining_items_count' => $remainingItems->count(),
+                        'cancelled_items' => $cancelledItems->map(fn($item) => [
+                            'item_id' => $item->id,
+                            'line_item_id' => $item->line_item_id,
+                            'product_name' => $item->product_name,
+                            'quantity' => (int) $item->quantity,
+                            'unit_price' => (float) $item->unit_price,
+                            'status' => $item->status,
+                            'flag_reason' => $item->flag_reason,
+                        ])->values(),
+                        'remaining_items' => $remainingItems->map(fn($item) => [
+                            'item_id' => $item->id,
+                            'line_item_id' => $item->line_item_id,
+                            'product_name' => $item->product_name,
+                            'quantity' => (int) $item->quantity,
+                            'unit_price' => (float) $item->unit_price,
+                            'status' => $item->status,
+                        ])->values(),
+                        'assignment' => $this->formatAssignmentData($assignment),
+                    ];
+                });
+
+                return response()->json([
+                    'status' => 'success',
+                    'message' => 'Partially cancelled orders retrieved successfully.',
+                    'count' => $results->count(),
+                    'data' => $results,
+                ], 200);
+            }
+
+            // ========================================================
+            // B. Process Partial Cancellation
+            // ========================================================
+            if (empty($orderNumber) && empty($orderId)) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'The order_number or order_id parameter is required.',
+                ], 422);
+            }
+
+            $order = null;
+            if (!empty($orderId)) {
+                $order = Order::with(['items', 'payment'])->find($orderId);
+            }
+            if (!$order && !empty($orderNumber)) {
+                $cleanNum = ltrim($orderNumber, '#');
+                $order = Order::with(['items', 'payment'])
+                    ->where('order_number', $orderNumber)
+                    ->orWhere('order_number', $cleanNum)
+                    ->orWhere('order_number', '#' . $cleanNum)
+                    ->orWhere('order_number', 'SO-' . $cleanNum)
+                    ->orWhere('id', $orderNumber)
+                    ->first();
+            }
+
+            if (!$order) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => "Order not found for identifier '" . ($orderNumber ?: $orderId) . "'.",
+                ], 404);
+            }
+
+            if (!$hasItemsToCancel) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Please provide line_item_id, line_item_ids, item_id, or cancelled_items to cancel.',
+                    'available_items' => $order->items->map(fn($i) => [
+                        'item_id' => $i->id,
+                        'line_item_id' => $i->line_item_id,
+                        'product_name' => $i->product_name,
+                        'status' => $i->status,
+                    ])->values(),
+                ], 422);
+            }
+
+            // Locate target items in order
+            $targetItems = $order->items->filter(function ($item) use ($requestedLineItemIds, $requestedItemIds, $requestedBarcodes) {
+                if (!empty($requestedLineItemIds) && in_array((string) $item->line_item_id, $requestedLineItemIds)) {
+                    return true;
+                }
+                if (!empty($requestedItemIds) && in_array($item->id, $requestedItemIds)) {
+                    return true;
+                }
+                if (!empty($requestedBarcodes) && in_array((string) $item->barcode, $requestedBarcodes)) {
+                    return true;
+                }
+                return false;
+            });
+
+            if ($targetItems->isEmpty()) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => "No matching items found in Order {$order->order_number} for specified identifiers.",
+                    'requested_line_item_ids' => $requestedLineItemIds,
+                    'requested_item_ids' => $requestedItemIds,
+                    'available_items' => $order->items->map(fn($i) => [
+                        'item_id' => $i->id,
+                        'line_item_id' => $i->line_item_id,
+                        'product_name' => $i->product_name,
+                        'status' => $i->status,
+                    ])->values(),
+                ], 404);
+            }
+
+            // Check if any requested item is already delivered
+            $alreadyDeliveredItems = $targetItems->filter(fn($i) => $i->status === 'delivered');
+            if ($alreadyDeliveredItems->isNotEmpty()) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Cannot cancel item(s) that have already been marked as delivered.',
+                    'delivered_items' => $alreadyDeliveredItems->map(fn($i) => [
+                        'item_id' => $i->id,
+                        'product_name' => $i->product_name,
+                        'status' => $i->status,
+                    ])->values(),
+                ], 400);
+            }
+
+            // Find driver assignment
+            $cleanNum = ltrim($order->order_number, '#');
+            $assignment = OrderDriverAssigned::where('order_id', $order->id)
+                ->orWhere('order_number', $order->order_number)
+                ->orWhere('order_number', $cleanNum)
+                ->orWhere('order_number', '#' . $cleanNum)
+                ->first();
+
+            $driverUserId = $assignment ? $assignment->assigned_driver_user_id : (auth()->id() ?: null);
+            $driverName = $assignment ? $assignment->driver_name : (auth()->user()?->name ?? 'Driver User');
+
+            // 1. Mark target items as cancelled & flagged
+            $cancelledItemsData = [];
+            foreach ($targetItems as $item) {
+                $item->update([
+                    'status' => 'cancelled',
+                    'is_flagged' => true,
+                    'flag_reason' => $reason,
+                ]);
+
+                // Create discrepancy record for driver and admin visibility
+                OrderItemDiscrepancy::create([
+                    'order_id' => $order->id,
+                    'order_item_id' => $item->id,
+                    'user_id' => $driverUserId,
+                    'user_name' => $driverName,
+                    'issue_type' => 'partially_cancelled',
+                    'comment' => "Customer cancelled this item while out for delivery. Reason: {$reason}",
+                    'status' => 'cancelled',
+                ]);
+
+                $cancelledItemsData[] = [
+                    'item_id' => $item->id,
+                    'line_item_id' => $item->line_item_id,
+                    'product_name' => $item->product_name,
+                    'barcode' => $item->barcode,
+                    'quantity' => (int) $item->quantity,
+                    'unit_price' => (float) $item->unit_price,
+                    'status' => 'cancelled',
+                    'flag_reason' => $reason,
+                ];
+            }
+
+            // 2. Recalculate Remaining Order Total
+            $freshItems = OrderItem::where('order_id', $order->id)->get();
+            $remainingDeliverableItems = $freshItems->where('status', '!=', 'cancelled');
+            $allCancelledItems = $freshItems->where('status', 'cancelled');
+
+            $originalTotalAmount = (float) $order->total_amount;
+            $newRemainingTotalAmount = (float) $remainingDeliverableItems->sum(function ($item) {
+                return (float) ($item->quantity * $item->unit_price);
+            });
+            $cancelledTotalAmount = (float) $allCancelledItems->sum(function ($item) {
+                return (float) ($item->quantity * $item->unit_price);
+            });
+
+            $isAllItemsCancelled = $remainingDeliverableItems->isEmpty();
+
+            // Update Order Record
+            $oldOrderStatus = $order->status;
+            if ($isAllItemsCancelled) {
+                $order->status = 'cancelled';
+            }
+            $order->total_amount = $newRemainingTotalAmount;
+            if ($order->collected_amount > $newRemainingTotalAmount) {
+                $order->collected_amount = $newRemainingTotalAmount;
+            }
+            $order->save();
+
+            // 3. Update Driver Assignment Record
+            if ($assignment) {
+                if ($isAllItemsCancelled) {
+                    $assignment->order_status = 'cancelled';
+                    $assignment->driver_status = 'cancelled';
+                    $assignment->cancelled_at = now();
+                } else {
+                    $assignment->order_status = $order->status;
+                    // Recalculate collected amount for driver collection if COD
+                    if ($assignment->payment_method === 'cash' || str_contains(strtolower((string)$assignment->payment_method), 'cod')) {
+                        $assignment->collected_amount = $newRemainingTotalAmount;
+                    }
+                }
+                $assignment->save();
+            }
+
+            // 4. Update OrderPayment Record if exists
+            if ($order->payment) {
+                $order->payment->total_price = $newRemainingTotalAmount;
+                $order->payment->total_outstanding = max(0.00, $newRemainingTotalAmount - (float) $order->payment->paid_amount);
+                $order->payment->save();
+            }
+
+            $currency = $order->payment?->currency ?: 'QAR';
+
+            // 5. Audit Log
+            OrderStatusLog::create([
+                'order_id' => $order->id,
+                'user_id' => $driverUserId,
+                'user_name' => $driverName,
+                'action' => 'driver_partially_cancelled',
+                'old_status' => $oldOrderStatus,
+                'new_status' => $order->status,
+                'notes' => "Order partially cancelled. Cancelled {$targetItems->count()} item(s). Original Total: {$originalTotalAmount} {$currency}, New Remaining Total: {$newRemainingTotalAmount} {$currency}. Reason: {$reason}",
+            ]);
+
+            // 6. Driver Notification Object
+            $driverNotification = [
+                'type' => 'partially_cancelled_alert',
+                'title' => "Order {$order->order_number} Partially Cancelled",
+                'message' => $isAllItemsCancelled
+                    ? "Customer cancelled all items for Order {$order->order_number}. Order has been cancelled. Do not deliver."
+                    : "Customer cancelled {$targetItems->count()} item(s) for Order {$order->order_number}. Please do NOT deliver the cancelled items. New amount to collect: {$newRemainingTotalAmount} {$currency}.",
+                'order_id' => $order->id,
+                'order_number' => $order->order_number,
+                'driver_user_id' => $driverUserId ? (int) $driverUserId : null,
+                'driver_name' => $driverName,
+                'cancelled_items_count' => $targetItems->count(),
+                'total_cancelled_items' => $allCancelledItems->count(),
+                'remaining_deliverable_items_count' => $remainingDeliverableItems->count(),
+                'original_total_amount' => $originalTotalAmount,
+                'cancelled_items_amount' => $cancelledTotalAmount,
+                'new_total_amount' => $newRemainingTotalAmount,
+                'currency' => $currency,
+                'can_deliver_remaining' => !$isAllItemsCancelled,
+                'instructions' => $isAllItemsCancelled
+                    ? "Return all items to warehouse. Order is completely cancelled."
+                    : "Deliver only the {$remainingDeliverableItems->count()} remaining item(s). Cancelled items are locked and will not be marked as delivered.",
+                'timestamp' => now()->toIso8601String(),
+            ];
+
+            $remainingItemsData = $remainingDeliverableItems->map(fn($item) => [
+                'item_id' => $item->id,
+                'line_item_id' => $item->line_item_id,
+                'product_name' => $item->product_name,
+                'barcode' => $item->barcode,
+                'quantity' => (int) $item->quantity,
+                'unit_price' => (float) $item->unit_price,
+                'status' => $item->status,
+                'deliverable' => true,
+            ])->values();
+
+            $loadedAssignment = $assignment ? $assignment->fresh(['order.items', 'order.payment', 'driver']) : null;
+
+            return response()->json([
+                'status' => 'success',
+                'message' => $isAllItemsCancelled
+                    ? "All items for Order {$order->order_number} cancelled. Order marked as cancelled."
+                    : "Order {$order->order_number} partially cancelled. Remaining total: {$newRemainingTotalAmount} {$currency}. Driver notified.",
+                'data' => [
+                    'order_id' => $order->id,
+                    'order_number' => $order->order_number,
+                    'order_status' => $order->status,
+                    'driver_status' => $assignment ? $assignment->driver_status : null,
+                    'driver_notification' => $driverNotification,
+                    'original_total_amount' => $originalTotalAmount,
+                    'cancelled_amount' => $cancelledTotalAmount,
+                    'new_total_amount' => $newRemainingTotalAmount,
+                    'currency' => $currency,
+                    'cancelled_items' => $cancelledItemsData,
+                    'remaining_items' => $remainingItemsData,
+                    'assignment' => $loadedAssignment ? $this->formatAssignmentData($loadedAssignment) : null,
+                ],
+            ], 200);
+
+        } catch (Exception $e) {
+            Log::error('Partially Cancelled Order Error: ' . $e->getMessage());
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Failed to process partial order cancellation: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
 }
+

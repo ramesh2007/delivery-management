@@ -88,8 +88,8 @@ Route::prefix('admin')->group(function () {
     //Pickers 
     Route::get('/get-pickers-list', [PickerAdminController::class, 'getPickersList']);
     Route::any('/assign-items-by-picker', [PickerAdminController::class, 'assignItemsByPicker']);
-    Route::any('/orders/unassign-picker-items',[PickerAdminController::class,'unassignItemsByPicker']);
-    Route::any('/orders/assign-order-wise-picker',[PickerAdminController::class,'assignOrderWithItems']);
+    Route::any('/orders/unassign-picker-items', [PickerAdminController::class, 'unassignItemsByPicker']);
+    Route::any('/orders/assign-order-wise-picker', [PickerAdminController::class, 'assignOrderWithItems']);
     //Packers
     Route::get('/get-packers-list', [PackerAdminController::class, 'getPackersList']);
 
@@ -142,7 +142,7 @@ Route::prefix('admin')->group(function () {
 
 
 // Flutter App Order Management API Endpoints (Sync, Item Status update, Picker Assignment, User Logs)
-Route::prefix('mobile')->group(function(){
+Route::prefix('mobile')->group(function () {
     Route::post('/login', [AuthController::class, 'login']);
     //Picker apis.
     Route::get('/orders', [PickerManagementController::class, 'index']);
@@ -243,6 +243,11 @@ Route::prefix('mobile')->group(function(){
     Route::match(['get', 'post'], 'scheduled/completed/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getCompletedInstallationsByInstallerUserId']);
     Route::match(['get', 'post'], 'scheduled/update-status/{id?}', [ScheduledInstallationMobileController::class, 'updateStatus']);
     Route::match(['get', 'post'], 'scheduled/installed-proof-upload', [ScheduledInstallationMobileController::class, 'InstalledProofimageupload']);
+
+    Route::match(['get', 'post'], 'driver/partially-cancelled', [DeliveryManagementController::class, 'PartiallyCancelledOrder']);
+    Route::match(['get', 'post'], 'orders/driver/partially-cancelled', [DeliveryManagementController::class, 'PartiallyCancelledOrder']);
+
+
 });
 
 
@@ -332,6 +337,7 @@ Route::post('/orders/driver/flag', [DeliveryManagementController::class, 'flagDe
 Route::post('/orders/driver/flag-delivery', [DeliveryManagementController::class, 'flagDelivery']);
 Route::get('/orders/driver/flagged/{driver_user_id?}', [DeliveryManagementController::class, 'getFlaggedOrders']);
 Route::get('/orders/driver/flagged-orders/{driver_user_id?}', [DeliveryManagementController::class, 'getFlaggedOrders']);
+Route::match(['get', 'post'], '/orders/driver/partially-cancelled', [DeliveryManagementController::class, 'PartiallyCancelledOrder']);
 Route::get('/orders/driver/discrepancies/{driver_user_id?}', [DeliveryManagementController::class, 'getDeliveryDiscrepancies']);
 
 // Order Item Discrepancy & Flagging Endpoints

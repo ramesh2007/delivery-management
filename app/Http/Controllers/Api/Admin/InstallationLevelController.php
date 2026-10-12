@@ -138,67 +138,74 @@ class InstallationLevelController extends Controller
      * @return JsonResponse
      */
 
-public function team(Request $request, $LocationId = null): JsonResponse
-{
-    try {
-        $rawLoc = $LocationId ?? $request->query('location_id') ?? $request->query('LocationId');
 
-        // If no location specified, return all technicians
-        if ($rawLoc === null || $rawLoc === '') {
+    public function team(Request $request): JsonResponse
+    {
+        try {
+            // Get location from query parameter
+            // Example:
+            // /api/admin/installation-level/teams?location_id=1
+            // /api/admin/installation-level/teams?LocationId=1
+            $rawLoc = $request->query('location_id')
+                ?? $request->query('LocationId');
+
+            // If no location specified, return all technicians
+            if ($rawLoc === null || $rawLoc === '') {
+                return response()->json([
+                    'status' => 'success',
+                    'message' => 'Team technicians retrieved successfully.',
+                    'count' => count(self::TECHNICIANS),
+                    'data' => self::TECHNICIANS,
+                ], 200);
+            }
+
+            $locationId = (int) $rawLoc;
+
+            // Find location from temporary locations
+            $location = collect(self::LOCATIONS)->first(function ($loc) use ($locationId, $rawLoc) {
+                return (int) $loc['location_id'] === $locationId
+                    || (int) $loc['id'] === $locationId
+                    || strcasecmp($loc['name'], (string) $rawLoc) === 0;
+            });
+
+            if (!$location) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Location not found.',
+                    'data' => [],
+                ], 404);
+            }
+
+            $actualLocationId = (int) $location['location_id'];
+
+            // Get technician IDs assigned to this location
+            $technicianIds = self::LOCATION_TECHNICIANS[$actualLocationId] ?? [];
+
+            // Get technicians from temporary technician list
+            $technicians = collect(self::TECHNICIANS)
+                ->whereIn('id', $technicianIds)
+                ->values()
+                ->all();
+
             return response()->json([
                 'status' => 'success',
                 'message' => 'Team technicians retrieved successfully.',
-                'count' => count(self::TECHNICIANS),
-                'data' => self::TECHNICIANS,
+                'location' => [
+                    'id' => $location['location_id'],
+                    'name' => $location['location_name'],
+                    'city' => $location['city'],
+                ],
+                'count' => count($technicians),
+                'data' => $technicians,
             ], 200);
-        }
 
-        $locationId = (int) $rawLoc;
-
-        // Find location from temporary locations
-        $location = collect(self::LOCATIONS)
-            ->first(function ($loc) use ($locationId, $rawLoc) {
-                return (int)$loc['location_id'] === $locationId ||
-                       (int)$loc['id'] === $locationId ||
-                       strcasecmp($loc['name'], (string)$rawLoc) === 0;
-            });
-
-        if (!$location) {
+        } catch (\Exception $e) {
             return response()->json([
                 'status' => 'error',
-                'message' => 'Location not found.',
-                'data' => [],
-            ], 404);
+                'message' => 'Failed to fetch team technicians: ' . $e->getMessage(),
+            ], 500);
         }
-
-        $actualLocationId = (int) $location['location_id'];
-
-        // Get technician IDs assigned to this location
-        $technicianIds = self::LOCATION_TECHNICIANS[$actualLocationId] ?? [];
-
-        // Get technicians from temporary technician list
-        $technicians = collect(self::TECHNICIANS)
-            ->whereIn('id', $technicianIds)
-            ->values()
-            ->all();
-
-        return response()->json([
-            'status' => 'success',
-            'message' => 'Team technicians retrieved successfully.',
-            'location' => [
-                'id' => $location['location_id'],
-                'name' => $location['location_name'],
-                'city' => $location['city'],
-            ],
-            'count' => count($technicians),
-            'data' => $technicians,
-        ], 200);
-
-    } catch (\Exception $e) {
-        return response()->json([
-            'status' => 'error',
-            'message' => 'Failed to fetch team technicians: ' . $e->getMessage(),
-        ], 500);
     }
-}
+
+
 }

@@ -154,4 +154,20 @@ class OrderItem extends Model
     {
         return $this->hasMany(OrderReturnReplacement::class, 'order_item_id')->orderBy('created_at', 'desc');
     }
+
+    /**
+     * Get the technician schedule associated with this order item.
+     */
+    public function technicianSchedule(): HasOne
+    {
+        return $this->hasOne(TechnicianScheduled::class, 'order_item_id');
+    }
+
+    /**
+     * Get all technician schedules associated with this order item.
+     */
+    public function technicianSchedules(): HasMany
+    {
+        return $this->hasMany(TechnicianScheduled::class, 'order_item_id');
+    }
 }

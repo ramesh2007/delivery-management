@@ -261,22 +261,50 @@ class ScheduleController extends Controller
     public function scheduledItems(Request $request): JsonResponse
     {
         try {
-            $perPage = max(1, min((int) ($request->input('per_page') ?? $request->query('per_page', 15)), 100));
+            $perPage = max(
+                1,
+                min(
+                    (int) ($request->input('per_page') ?? $request->query('per_page', 15)),
+                    100
+                )
+            );
 
-            // Determine is_scheduled_assigned filter: defaults to true
-            $scheduledParam = $request->input('is_scheduled_assigned') ?? $request->query('is_scheduled_assigned', 'true');
-            $isAll = in_array(strtolower((string) $scheduledParam), ['all', 'any', '*']);
-            $isScheduledAssigned = filter_var($scheduledParam, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+            /*
+            |--------------------------------------------------------------------------
+            | Determine scheduled filter
+            |--------------------------------------------------------------------------
+            */
+            $scheduledParam = $request->input('is_scheduled_assigned')
+                ?? $request->query('is_scheduled_assigned', 'true');
+
+            $isAll = in_array(
+                strtolower((string) $scheduledParam),
+                ['all', 'any', '*']
+            );
+
+            $isScheduledAssigned = filter_var(
+                $scheduledParam,
+                FILTER_VALIDATE_BOOLEAN,
+                FILTER_NULL_ON_FAILURE
+            );
+
             if ($isScheduledAssigned === null && !$isAll) {
                 $isScheduledAssigned = true;
             }
 
+            /*
+            |--------------------------------------------------------------------------
+            | Base query
+            |--------------------------------------------------------------------------
+            */
             $query = OrderItem::with([
                 'order.driverAssignment',
                 'order.payment',
                 'order.assignedUser',
                 'order.deliveredUser',
+
                 'installation',
+
                 'assignedUser',
                 'pickedUser',
                 'packedUser',
@@ -284,95 +312,300 @@ class ScheduleController extends Controller
                 'packerVerifiedUser',
             ]);
 
-            // Filter for items with installation and matched is_scheduled_assigned
-            $query->whereHas('installation', function ($q) use ($isAll, $isScheduledAssigned) {
-                if (!$isAll) {
-                    $q->where('is_scheduled_assigned', (bool) $isScheduledAssigned);
-                }
-            });
+            /*
+            |--------------------------------------------------------------------------
+            | Scheduled order filter
+            |--------------------------------------------------------------------------
+            |
+            | IMPORTANT:
+            |
+            | We are NOT checking the installation of the current OrderItem.
+            |
+            | Instead:
+            |
+            |   1. Find orders having at least one scheduled item.
+            |   2. Return ALL items belonging to those orders.
+            |
+            | Example:
+            |
+            | Order #1010
+            |   Item A -> scheduled
+            |   Item B -> not scheduled
+            |
+            | Both Item A and Item B will be returned.
+            |
+            |--------------------------------------------------------------------------
+            */
+            if (!$isAll) {
+                $query->whereHas('order', function ($orderQuery) use ($isScheduledAssigned) {
 
-            // Search filter across order number, customer, product code, product name, barcode
-            $search = trim((string) ($request->input('search') ?? $request->query('search', '')));
+                    $orderQuery->whereHas('items', function ($itemQuery) use ($isScheduledAssigned) {
+
+                        $itemQuery->whereHas('installation', function ($installationQuery) use ($isScheduledAssigned) {
+
+                            $installationQuery->where(
+                                'is_scheduled_assigned',
+                                (bool) $isScheduledAssigned
+                            );
+
+                        });
+
+                    });
+
+                });
+            } else {
+                /*
+                |--------------------------------------------------------------------------
+                | ALL
+                |--------------------------------------------------------------------------
+                |
+                | When is_scheduled_assigned=all, return items from orders that
+                | have an installation record.
+                |
+                */
+                $query->whereHas('order', function ($orderQuery) {
+
+                    $orderQuery->whereHas('items', function ($itemQuery) {
+
+                        $itemQuery->whereHas('installation');
+
+                    });
+
+                });
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Search filter
+            |--------------------------------------------------------------------------
+            */
+            $search = trim(
+                (string) (
+                    $request->input('search')
+                    ?? $request->query('search', '')
+                )
+            );
+
             if ($search !== '') {
                 $query->where(function ($q) use ($search) {
+
                     $q->where('product_name', 'like', "%{$search}%")
-                      ->orWhere('product_code', 'like', "%{$search}%")
-                      ->orWhere('barcode', 'like', "%{$search}%")
-                      ->orWhereHas('order', function ($oq) use ($search) {
-                          $oq->where('order_number', 'like', "%{$search}%")
-                             ->orWhere('customer_name', 'like', "%{$search}%")
-                             ->orWhere('customer_phone', 'like', "%{$search}%")
-                             ->orWhere('delivery_address', 'like', "%{$search}%");
-                      });
+                        ->orWhere('product_code', 'like', "%{$search}%")
+                        ->orWhere('barcode', 'like', "%{$search}%")
+
+                        ->orWhereHas('order', function ($oq) use ($search) {
+
+                            $oq->where('order_number', 'like', "%{$search}%")
+                                ->orWhere('customer_name', 'like', "%{$search}%")
+                                ->orWhere('customer_phone', 'like', "%{$search}%")
+                                ->orWhere('delivery_address', 'like', "%{$search}%");
+
+                        });
+
                 });
             }
 
-            // Status filter (e.g. status=pending, picking, picked, etc.)
-            $status = $request->input('status') ?? $request->query('status');
+            /*
+            |--------------------------------------------------------------------------
+            | Order Item Status filter
+            |--------------------------------------------------------------------------
+            */
+            $status = $request->input('status')
+                ?? $request->query('status');
+
             if (!empty($status) && strtolower((string) $status) !== 'all') {
+
                 $query->where('status', $status);
+
             }
 
-            // Order status filter
-            $orderStatus = $request->input('order_status') ?? $request->query('order_status');
+            /*
+            |--------------------------------------------------------------------------
+            | Order Status filter
+            |--------------------------------------------------------------------------
+            */
+            $orderStatus = $request->input('order_status')
+                ?? $request->query('order_status');
+
             if (!empty($orderStatus) && strtolower((string) $orderStatus) !== 'all') {
+
                 $query->whereHas('order', function ($oq) use ($orderStatus) {
+
                     $oq->where('status', $orderStatus);
+
+                });
+
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Installation Type filter
+            |--------------------------------------------------------------------------
+            */
+            $installationType = $request->input('installation_type')
+                ?? $request->query('installation_type');
+
+            if (
+                !empty($installationType)
+                && strtolower((string) $installationType) !== 'all'
+            ) {
+
+                /*
+                |--------------------------------------------------------------------------
+                | Important:
+                |
+                | Since we are returning ALL items belonging to a scheduled order,
+                | applying installation_type directly to the current item would
+                | remove other items from that order.
+                |
+                | Therefore, check whether the ORDER has an item with the requested
+                | installation type.
+                |--------------------------------------------------------------------------
+                */
+                $query->whereHas('order', function ($orderQuery) use ($installationType) {
+
+                    $orderQuery->whereHas('items', function ($itemQuery) use ($installationType) {
+
+                        $itemQuery->whereHas('installation', function ($installationQuery) use ($installationType) {
+
+                            $installationQuery->where(
+                                'installation_type',
+                                $installationType
+                            );
+
+                        });
+
+                    });
+
                 });
             }
 
-            // Installation type filter
-            $installationType = $request->input('installation_type') ?? $request->query('installation_type');
-            if (!empty($installationType) && strtolower((string) $installationType) !== 'all') {
-                $query->whereHas('installation', function ($iq) use ($installationType) {
-                    $iq->where('installation_type', $installationType);
-                });
-            }
+            /*
+            |--------------------------------------------------------------------------
+            | Sorting
+            |--------------------------------------------------------------------------
+            */
+            $sortBy = $request->input('sort_by')
+                ?? $request->query('sort_by', 'created_at');
 
-            // Sorting
-            $sortBy = $request->input('sort_by') ?? $request->query('sort_by', 'created_at');
-            $sortDirection = strtolower((string) ($request->input('sort_direction') ?? $request->query('sort_direction', 'desc'))) === 'asc' ? 'asc' : 'desc';
+            $sortDirection = strtolower(
+                (string) (
+                    $request->input('sort_direction')
+                    ?? $request->query('sort_direction', 'desc')
+                )
+            ) === 'asc'
+                ? 'asc'
+                : 'desc';
 
-            if (in_array($sortBy, ['id', 'created_at', 'updated_at', 'product_name', 'unit_price', 'quantity', 'status'])) {
+            if (
+                in_array(
+                    $sortBy,
+                    [
+                        'id',
+                        'created_at',
+                        'updated_at',
+                        'product_name',
+                        'unit_price',
+                        'quantity',
+                        'status'
+                    ]
+                )
+            ) {
+
                 $query->orderBy($sortBy, $sortDirection);
+
             } else {
+
                 $query->orderBy('created_at', 'desc');
+
             }
 
+            /*
+            |--------------------------------------------------------------------------
+            | Pagination
+            |--------------------------------------------------------------------------
+            */
             $paginator = $query->paginate($perPage);
 
-            $formattedItems = collect($paginator->items())->map(function (OrderItem $item) {
-                return $this->formatItemDetails($item);
-            })->values();
+            /*
+            |--------------------------------------------------------------------------
+            | Format response
+            |--------------------------------------------------------------------------
+            */
+            $formattedItems = collect($paginator->items())
+                ->map(function (OrderItem $item) {
 
+                    return $this->formatItemDetails($item);
+
+                })
+                ->values();
+
+            /*
+            |--------------------------------------------------------------------------
+            | Response
+            |--------------------------------------------------------------------------
+            */
             return response()->json([
+
                 'success' => true,
+
                 'status' => 'success',
+
                 'message' => 'Scheduled order items retrieved successfully.',
-                'status_filter' => $isAll ? 'all' : ($isScheduledAssigned ? 'scheduled_assigned' : 'not_scheduled_assigned'),
+
+                'status_filter' => $isAll
+                    ? 'all'
+                    : (
+                        $isScheduledAssigned
+                            ? 'scheduled_assigned'
+                            : 'not_scheduled_assigned'
+                    ),
+
                 'pagination' => [
+
                     'current_page' => $paginator->currentPage(),
+
                     'per_page' => $paginator->perPage(),
+
                     'total' => $paginator->total(),
+
                     'last_page' => $paginator->lastPage(),
+
                     'from' => $paginator->firstItem(),
+
                     'to' => $paginator->lastItem(),
+
                     'has_more_pages' => $paginator->hasMorePages(),
+
                     'next_page_url' => $paginator->nextPageUrl(),
+
                     'prev_page_url' => $paginator->previousPageUrl(),
+
                 ],
+
                 'data' => $formattedItems,
+
             ], 200);
 
         } catch (\Throwable $e) {
-            Log::error('Error in ScheduleController@scheduledItems: ' . $e->getMessage(), [
-                'trace' => $e->getTraceAsString()
-            ]);
+
+            Log::error(
+                'Error in ScheduleController@scheduledItems: ' . $e->getMessage(),
+                [
+                    'trace' => $e->getTraceAsString()
+                ]
+            );
 
             return response()->json([
+
                 'status' => 'error',
+
                 'success' => false,
-                'message' => 'An error occurred while retrieving scheduled items: ' . $e->getMessage()
+
+                'message' =>
+                    'An error occurred while retrieving scheduled items: '
+                    . $e->getMessage(),
+
             ], 500);
         }
     }

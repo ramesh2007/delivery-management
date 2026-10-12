@@ -36,4 +36,12 @@ class OrderInstallation extends Model
     {
         return $this->belongsTo(OrderItem::class, 'order_item_id');
     }
+
+    /**
+     * Get the technician schedule associated with this installation.
+     */
+    public function technicianSchedule()
+    {
+        return $this->hasOne(TechnicianScheduled::class, 'order_installation_id');
+    }
 }

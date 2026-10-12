@@ -249,6 +249,9 @@ Route::prefix('mobile')->group(function(){
     Route::match(['get', 'post'], '/packer/dashboard/{packer_id?}', [DashboardController::class, 'packerDashboard']);
     Route::match(['get', 'post'], '/driver/dashboard/{driver_id?}', [DashboardController::class, 'driverDashboard']);
     Route::match(['get', 'post'], '/installer/dashboard/{installer_id?}', [DashboardController::class, 'installationDashboard']);
+    //partially cancelled
+    Route::match(['get', 'post'], 'driver/partially-cancelled', [DeliveryManagementController::class, 'PartiallyCancelledOrder']);
+    Route::match(['get', 'post'], 'orders/driver/partially-cancelled', [DeliveryManagementController::class, 'PartiallyCancelledOrder']);
 });
 
 

@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasManyThrough;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Order extends Model
@@ -88,8 +89,9 @@ class Order extends Model
     {
         return $this->belongsTo(User::class, 'assigned_to');
     }
-    public function pickedUser(){
-        return $this->belongsTo(User::Class,'picked_by');
+    public function pickedUser()
+    {
+        return $this->belongsTo(User::class, 'picked_by');
     }
     /**
      * Get the user who packed this order.
@@ -130,10 +132,10 @@ class Order extends Model
     {
         return $this->hasOne(OrderPayment::class, 'order_id');
     }
-    public function returnReplacements(): HasMany
-    {
-        return $this->hasMany(OrderReturnReplacement::class, 'order_id')->orderBy('created_at', 'desc');
-    }
+    // public function returnReplacements(): HasMany
+    // {
+    //     return $this->hasMany(OrderReturnReplacement::class, 'order_id')->orderBy('created_at', 'desc');
+    // }
 
     /**
      * Get technician schedules for this order.
@@ -141,6 +143,27 @@ class Order extends Model
     public function technicianSchedules(): HasMany
     {
         return $this->hasMany(TechnicianScheduled::class, 'order_id');
+    }
+
+    /**
+     * Get all installation records for items belonging to this order.
+     */
+    public function orderInstallations(): HasManyThrough
+    {
+        return $this->hasManyThrough(OrderInstallation::class, OrderItem::class, 'order_id', 'order_item_id');
+    }
+
+    public function installations(): HasManyThrough
+    {
+        return $this->hasManyThrough(OrderInstallation::class, OrderItem::class, 'order_id', 'order_item_id');
+    }
+
+    /**
+     * Get all installation proof images for this order.
+     */
+    public function installationImages(): HasMany
+    {
+        return $this->hasMany(InstallationImage::class, 'order_id');
     }
 }
 

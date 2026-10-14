@@ -90,8 +90,8 @@ Route::prefix('admin')->group(function () {
     //Pickers 
     Route::get('/get-pickers-list', [PickerAdminController::class, 'getPickersList']);
     Route::any('/assign-items-by-picker', [PickerAdminController::class, 'assignItemsByPicker']);
-    Route::any('/orders/unassign-picker-items',[PickerAdminController::class,'unassignItemsByPicker']);
-    Route::any('/orders/assign-order-wise-picker',[PickerAdminController::class,'assignOrderWithItems']);
+    Route::any('/orders/unassign-picker-items', [PickerAdminController::class, 'unassignItemsByPicker']);
+    Route::any('/orders/assign-order-wise-picker', [PickerAdminController::class, 'assignOrderWithItems']);
     Route::post('/orders/order-wise-picker-unassign', [PickerAdminController::class, 'unassignOrderWithItems']);
 
     //Packers
@@ -149,7 +149,7 @@ Route::prefix('admin')->group(function () {
 
 
 // Flutter App Order Management API Endpoints (Sync, Item Status update, Picker Assignment, User Logs)
-Route::prefix('mobile')->group(function(){
+Route::prefix('mobile')->group(function () {
     Route::post('/login', [AuthController::class, 'login']);
     //Picker apis.
     Route::get('/orders', [PickerManagementController::class, 'index']);
@@ -239,7 +239,6 @@ Route::prefix('mobile')->group(function(){
     //schedule installation
     Route::match(['get', 'post'], 'scheduled/get/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getScheduledInstallationByInstallerUserId']);
     Route::match(['get', 'post'], 'scheduled/in-progress/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getInProgressInstallationsByInstallerUserId']);
-    Route::match(['get', 'post'], 'scheduled/inprogress/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getInProgressInstallationsByInstallerUserId']);
     Route::match(['get', 'post'], 'scheduled/completed/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getCompletedInstallationsByInstallerUserId']);
     Route::match(['get', 'post'], 'scheduled/update-status/{id?}', [ScheduledInstallationMobileController::class, 'updateStatus']);
     Route::match(['get', 'post'], 'scheduled/installed-proof-upload', [ScheduledInstallationMobileController::class, 'InstalledProofimageupload']);

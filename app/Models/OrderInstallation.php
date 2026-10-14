@@ -5,6 +5,8 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class OrderInstallation extends Model
 {
@@ -40,8 +42,21 @@ class OrderInstallation extends Model
     /**
      * Get the technician schedule associated with this installation.
      */
-    public function technicianSchedule()
+    public function technicianSchedule(): HasOne
     {
         return $this->hasOne(TechnicianScheduled::class, 'order_installation_id');
+    }
+
+    /**
+     * Get the installation proof image records associated with this installation.
+     */
+    public function installationImages(): HasMany
+    {
+        return $this->hasMany(InstallationImage::class, 'order_installation_id');
+    }
+
+    public function proofImages(): HasMany
+    {
+        return $this->hasMany(InstallationImage::class, 'order_installation_id');
     }
 }

@@ -170,4 +170,12 @@ class OrderItem extends Model
     {
         return $this->hasMany(TechnicianScheduled::class, 'order_item_id');
     }
+
+    /**
+     * Get all installation proof images for this item.
+     */
+    public function installationImages(): HasMany
+    {
+        return $this->hasMany(InstallationImage::class, 'order_item_id');
+    }
 }

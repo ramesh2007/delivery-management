@@ -131,8 +131,9 @@ class PackerManagementController extends Controller
         if (!$packerId) {
             $packerId = $request->query('user_id')
                 ?? $request->query('packer_id')
-                ?? $request->query('id');
-    
+                ?? $request->query('id')
+                ?? (Auth::check() ? (string) Auth::id() : null);
+
             if ($packerId) {
                 $packerId = trim((string) $packerId);
             }
@@ -180,23 +181,69 @@ class PackerManagementController extends Controller
         });
     
         /*
-         * Optional packer filter
+         * Check if this request is for the "Ready to Pack" list
+         * (either via route /orders/packer/ready-to-pack or query parameter ?unassigned=1)
          */
-        if (!empty($packerId)) {
+        $isReadyToPackRoute = $request->is('*ready-to-pack*')
+            || $request->routeIs('*ready-to-pack*')
+            || $request->boolean('unassigned');
+
+        if ($isReadyToPackRoute) {
+            /*
+             * Ready to Pack list:
+             * MUST ONLY show orders that are NOT yet assigned to any packer.
+             * Once assigned (packed_by is set or packerAssignment exists),
+             * it will NO LONGER appear in this Ready to Pack list and will only appear
+             * in the assigned orders list for that packer.
+             */
+            $query->where(function ($q) {
+                $q->whereNull('packed_by')
+                    ->orWhere('packed_by', '');
+            })
+            ->where(function ($q) {
+                $q->whereDoesntHave('packerAssignment')
+                    ->orWhereHas('packerAssignment', function ($pa) {
+                        $pa->whereNull('packer_assigned_user_id')
+                            ->orWhere('packer_assigned_user_id', '');
+                    });
+            })
+            ->whereDoesntHave('items', function ($iq) {
+                $iq->whereNotNull('packed_by')
+                    ->where('packed_by', '!=', '');
+            });
+        } elseif (!empty($packerId)) {
+            /*
+             * Assigned orders list for a specific packer user ID
+             */
             $query->where(function ($q) use ($packerId) {
                 $q->where('packed_by', $packerId)
                     ->orWhere('packed_user_name', $packerId)
                     ->orWhereHas('packerAssignment', function ($pa) use ($packerId) {
                         $pa->where('packer_assigned_user_id', $packerId)
                             ->orWhere('packer_assigned_user_name', $packerId);
+                    })
+                    ->orWhereHas('items', function ($iq) use ($packerId) {
+                        $iq->where('packed_by', $packerId)
+                            ->orWhere('packed_user_name', $packerId);
                     });
             });
-        } elseif ($request->boolean('unassigned')) {
+        } else {
             /*
-             * Only show orders not assigned to any packer
+             * Default when calling assigned orders route (/orders/packer/picked)
+             * without a specific packer ID: return only assigned orders.
              */
-            $query->whereNull('packed_by')
-                ->whereDoesntHave('packerAssignment');
+            $query->where(function ($q) {
+                $q->whereNotNull('packed_by')
+                    ->where('packed_by', '!=', '')
+                    ->orWhereHas('packerAssignment', function ($pa) {
+                        $pa->whereNotNull('packer_assigned_user_id')
+                            ->where('packer_assigned_user_id', '!=', '');
+                    })
+                    ->orWhereHas('items', function ($iq) {
+                        $iq->whereNotNull('packed_by')
+                            ->where('packed_by', '!=', '');
+                    });
+            });
         }
     
         /*

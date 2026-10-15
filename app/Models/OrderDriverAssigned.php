@@ -20,6 +20,7 @@ class OrderDriverAssigned extends Model
         'zone',
         'order_status',
         'driver_status',
+        'is_bag_verified',
         'payment_method',
         'payment_status',
         'collected_amount',
@@ -33,6 +34,7 @@ class OrderDriverAssigned extends Model
     ];
 
     protected $casts = [
+        'is_bag_verified' => 'boolean',
         'assigned_at' => 'datetime',
         'accepted_at' => 'datetime',
         'started_at' => 'datetime',

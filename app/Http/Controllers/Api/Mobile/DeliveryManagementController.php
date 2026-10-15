@@ -1302,8 +1302,16 @@ class DeliveryManagementController extends Controller
                 $assignment->{$timestampColumn} = now();
             }
 
+            if ($request->has('is_bag_verified')) {
+                $bagVer = filter_var($request->input('is_bag_verified'), FILTER_VALIDATE_BOOLEAN);
+                $assignment->is_bag_verified = $bagVer;
+            }
+
             // Sync main order status & delivery fields
             $order = Order::with('payment')->find($assignment->order_id);
+            if ($order && $request->has('is_bag_verified')) {
+                $order->update(['is_bag_verified' => $assignment->is_bag_verified]);
+            }
             $oldOrderStatus = $order ? $order->status : null;
             if ($order) {
                 // Keep payment fields on assignment in sync with order / Shopify
@@ -1404,7 +1412,7 @@ class DeliveryManagementController extends Controller
         $itemsCount = $order && $order->items ? $order->items->count() : 0;
         $totalItems = $itemsCount;
         $verifiedItemsCount = $order && $order->items ? $order->items->where('is_packer_verified', true)->count() : 0;
-        $isBagVerified = ($totalItems > 0) && ($verifiedItemsCount === $totalItems);
+        $isBagVerified = (bool) ($assignment->is_bag_verified ?? $order?->is_bag_verified ?? false);
 
         $discrepancy = $order ? OrderItemDiscrepancy::where('order_id', $order->id)->latest()->first() : null;
 
@@ -1430,9 +1438,7 @@ class DeliveryManagementController extends Controller
             'items_count' => $itemsCount,
             'total_items' => $totalItems,
             'verified_items_count' => $verifiedItemsCount,
-            'is_verified' => $isBagVerified,
             'is_bag_verified' => $isBagVerified,
-            'is_all_items_verified' => $isBagVerified,
             'assigned_at' => $assignment->assigned_at ? $assignment->assigned_at->toIso8601String() : null,
             'accepted_at' => $assignment->accepted_at ? $assignment->accepted_at->toIso8601String() : null,
             'started_at' => $assignment->started_at ? $assignment->started_at->toIso8601String() : null,
@@ -1475,9 +1481,7 @@ class DeliveryManagementController extends Controller
             'items_count' => $itemsCount,
             'total_items' => $totalItems,
             'verified_items_count' => $verifiedItemsCount,
-            'is_verified' => $isBagVerified,
             'is_bag_verified' => $isBagVerified,
-            'is_all_items_verified' => $isBagVerified,
             'created_at' => $order->created_at ? $order->created_at->toIso8601String() : null,
             'items' => $order->items ? $order->items->map(function ($item) {
                 return [
@@ -1585,9 +1589,15 @@ class DeliveryManagementController extends Controller
                 ]);
             }
 
+            $orderUpdate = ['is_bag_verified' => true];
             if ($bagCount > 0) {
-                $order->update(['bag_count' => $bagCount]);
+                $orderUpdate['bag_count'] = $bagCount;
             }
+            $order->update($orderUpdate);
+
+            OrderDriverAssigned::where('order_id', $order->id)
+                ->orWhere('order_number', $order->order_number)
+                ->update(['is_bag_verified' => true]);
 
             $order->refresh();
         }
@@ -1595,11 +1605,11 @@ class DeliveryManagementController extends Controller
         $totalItems = $order->items->count();
         $verifiedItemsCount = $order->items->where('is_packer_verified', true)->count();
         $remainingCount = $totalItems - $verifiedItemsCount;
-        $isAllVerified = ($totalItems > 0) && ($verifiedItemsCount === $totalItems);
+        $isBagVerified = (bool) ($order->is_bag_verified ?? (($totalItems > 0) && ($verifiedItemsCount === $totalItems)));
 
         return response()->json([
             'success' => true,
-            'message' => $isAllVerified
+            'message' => $isBagVerified
                 ? "All {$totalItems} item(s) in Order {$order->order_number} are verified. Bag verification complete."
                 : "{$verifiedItemsCount} of {$totalItems} item(s) verified for Order {$order->order_number}.",
             'data' => [
@@ -1612,8 +1622,7 @@ class DeliveryManagementController extends Controller
                 'total_items' => $totalItems,
                 'verified_items_count' => $verifiedItemsCount,
                 'remaining_unverified_items' => $remainingCount,
-                'is_verified' => $isAllVerified,
-                'is_all_items_verified' => $isAllVerified,
+                'is_bag_verified' => $isBagVerified,
                 'items' => $order->items->map(function ($item) {
                     return [
                         'item_id' => $item->id,

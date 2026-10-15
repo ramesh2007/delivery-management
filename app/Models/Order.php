@@ -24,6 +24,7 @@ class Order extends Model
         'collected_amount',
         'status',
         'bag_count',
+        'is_bag_verified',
         'assigned_to',
         'assigned_user_name',
         'assigned_at',
@@ -37,6 +38,7 @@ class Order extends Model
 
     protected $casts = [
         'bag_count' => 'integer',
+        'is_bag_verified' => 'boolean',
         'assigned_at' => 'datetime',
         'packed_at' => 'datetime',
         'delivered_at' => 'datetime',

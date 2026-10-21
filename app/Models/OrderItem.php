@@ -19,6 +19,8 @@ class OrderItem extends Model
         'product_code',
         'barcode',
         'product_name',
+        'product_tags',
+        'gift_wrap',
         'image',
         'quantity',
         'unit_price',
@@ -54,6 +56,29 @@ class OrderItem extends Model
         'packed_at' => 'datetime',
         'delivered_at' => 'datetime',
     ];
+
+    protected $appends = [
+        'product_tag',
+    ];
+
+    /**
+     * Helper to get product_tag attribute ('VS' or null)
+     */
+    public function getProductTagAttribute(): ?string
+    {
+        if (empty($this->product_tags)) {
+            return null;
+        }
+
+        $tags = array_map('trim', explode(',', (string) $this->product_tags));
+        foreach ($tags as $tag) {
+            if (strcasecmp($tag, 'vs') === 0) {
+                return 'VS';
+            }
+        }
+
+        return null;
+    }
 
     /**
      * Ensure is_installable always resolves to a boolean

@@ -18,6 +18,7 @@ class Order extends Model
         'customer_name',
         'customer_phone',
         'delivery_address',
+        'notes',
         'total_amount',
         'payment_method',
         'payment_status',
@@ -43,6 +44,28 @@ class Order extends Model
         'packed_at' => 'datetime',
         'delivered_at' => 'datetime',
     ];
+
+    protected $appends = [
+        'product_tag',
+    ];
+
+    /**
+     * Get the order-level product_tag attribute ('VS' if any item has VS, else null).
+     */
+    public function getProductTagAttribute(): ?string
+    {
+        if (!$this->relationLoaded('items') || !$this->items) {
+            return null;
+        }
+
+        foreach ($this->items as $item) {
+            if ($item->product_tag === 'VS') {
+                return 'VS';
+            }
+        }
+
+        return null;
+    }
 
     /**
      * Get all items associated with this order.

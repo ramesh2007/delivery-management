@@ -44,6 +44,21 @@ class OrderDriverAssigned extends Model
         'exchange_at' => 'datetime',
     ];
 
+    protected $appends = [
+        'product_tag',
+    ];
+
+    /**
+     * Get the order-level product_tag attribute ('VS' or null).
+     */
+    public function getProductTagAttribute(): ?string
+    {
+        if ($this->relationLoaded('order') && $this->order) {
+            return $this->order->product_tag;
+        }
+        return null;
+    }
+
     /**
      * Get the order associated with this driver assignment.
      */

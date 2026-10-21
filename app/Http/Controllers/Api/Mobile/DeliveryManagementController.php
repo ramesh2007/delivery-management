@@ -84,7 +84,7 @@ class DeliveryManagementController extends Controller
     public function assignedDriver(Request $request): JsonResponse
     {
         try {
-            $query = OrderDriverAssigned::with(['order.items', 'driver']);
+            $query = OrderDriverAssigned::with(['order.items.installation', 'order.payment', 'driver']);
 
             // Optional driver filter from request body or query parameter
             $driverId = $request->input('assigned_driver_user_id')
@@ -257,12 +257,14 @@ class DeliveryManagementController extends Controller
                     $unverifiedOrders[] = [
                         'order_number' => $order->order_number,
                         'order_id' => $order->id,
+                        'product_tag' => $this->getOrderProductTag($order),
                         'total_items' => $order->items->count(),
                         'unverified_items_count' => $unverifiedItems->count(),
                         'unverified_items' => $unverifiedItems->map(fn($item) => [
                             'item_id' => $item->id,
                             'product_name' => $item->product_name,
                             'barcode' => $item->barcode,
+                            'product_tag' => $this->getProductTag($item),
                             'is_packer_verified' => false,
                         ])->values(),
                     ];
@@ -474,6 +476,7 @@ class DeliveryManagementController extends Controller
                     'order_id' => $order->id,
                     'order_number' => $order->order_number,
                     'status' => $order->status,
+                    'product_tag' => $this->getOrderProductTag($order),
                     'driver_status' => 'delivered',
                     'bag_count' => $bagCount,
                     'items_count' => $itemsCount,
@@ -688,6 +691,7 @@ class DeliveryManagementController extends Controller
                     'discrepancy_id' => $discrepancy->id,
                     'order_id' => $order->id,
                     'order_number' => $order->order_number,
+                    'product_tag' => $targetItem ? $this->getProductTag($targetItem) : $this->getOrderProductTag($order),
                     'order_item_id' => $targetItem ? $targetItem->id : null,
                     'product_name' => $targetItem ? $targetItem->product_name : null,
                     'reason' => $reason,
@@ -740,6 +744,7 @@ class DeliveryManagementController extends Controller
                     'order_number' => $order ? $order->order_number : null,
                     'order_item_id' => $disc->order_item_id,
                     'product_name' => $disc->orderItem ? $disc->orderItem->product_name : null,
+                    'product_tag' => $disc->orderItem ? $this->getProductTag($disc->orderItem) : null,
                     'reason' => $disc->issue_type,
                     'comment' => $disc->comment,
                     'photo_url' => $disc->photo_url,
@@ -755,6 +760,7 @@ class DeliveryManagementController extends Controller
                         'customer_name' => $order->customer_name ?? 'N/A',
                         'customer_phone' => $order->customer_phone ?? 'N/A',
                         'delivery_address' => $order->delivery_address ?? 'N/A',
+                        'product_tag' => $this->getOrderProductTag($order),
                         'status' => $order->status,
                         'bag_count' => (int) ($order->bag_count ?? 0),
                     ] : null,
@@ -791,7 +797,7 @@ class DeliveryManagementController extends Controller
                 ?? $request->query('driver_user_id')
                 ?? $request->query('assigned_driver_user_id');
 
-            $query = OrderDriverAssigned::with(['order.items', 'driver'])
+            $query = OrderDriverAssigned::with(['order.items.installation', 'order.payment', 'driver'])
                 ->where(function ($q) {
                     $q->where('driver_status', 'flagged')
                         ->orWhere('order_status', 'flagged')
@@ -817,65 +823,7 @@ class DeliveryManagementController extends Controller
             $assignments = $query->orderBy('updated_at', 'desc')->get();
 
             $formattedAssignments = $assignments->map(function ($assignment) {
-                $order = $assignment->order;
-                $bagCount = $order ? (int) ($order->bag_count ?? 0) : 0;
-                $itemsCount = $order && $order->items ? $order->items->count() : 0;
-
-                // Load discrepancy report if available
-                $discrepancy = $order ? OrderItemDiscrepancy::where('order_id', $order->id)->latest()->first() : null;
-
-                return [
-                    'id' => $assignment->id,
-                    'order_id' => $assignment->order_id,
-                    'order_number' => $assignment->order_number,
-                    'assigned_driver_user_id' => $assignment->assigned_driver_user_id ? (int) $assignment->assigned_driver_user_id : null,
-                    'driver_name' => $assignment->driver_name,
-                    'zone' => $assignment->zone,
-                    'order_status' => $assignment->order_status,
-                    'driver_status' => $assignment->driver_status,
-                    'bag_count' => $bagCount,
-                    'items_count' => $itemsCount,
-                    'total_items' => $itemsCount,
-                    'flag' => $discrepancy ? [
-                        'discrepancy_id' => $discrepancy->id,
-                        'reason' => $discrepancy->issue_type,
-                        'comment' => $discrepancy->comment,
-                        'photo_url' => $discrepancy->photo_url,
-                        'status' => $discrepancy->status,
-                        'flagged_at' => $discrepancy->created_at ? $discrepancy->created_at->toIso8601String() : null,
-                    ] : null,
-                    'created_at' => $assignment->created_at ? $assignment->created_at->toIso8601String() : null,
-                    'updated_at' => $assignment->updated_at ? $assignment->updated_at->toIso8601String() : null,
-                    'order' => $order ? [
-                        'id' => $order->id,
-                        'order_number' => $order->order_number,
-                        'customer_name' => $order->customer_name ?? 'N/A',
-                        'customer_phone' => $order->customer_phone ?? 'N/A',
-                        'delivery_address' => $order->delivery_address ?? 'N/A',
-                        'total_amount' => (float) $order->total_amount,
-                        'status' => $order->status,
-                        'bag_count' => $bagCount,
-                        'items_count' => $itemsCount,
-                        'total_items' => $itemsCount,
-                        'created_at' => $order->created_at ? $order->created_at->toIso8601String() : null,
-                        'items' => $order->items ? $order->items->map(function ($item) {
-                            return [
-                                'item_id' => $item->id,
-                                'line_item_id' => $item->line_item_id,
-                                'product_id' => $item->product_id,
-                                'product_code' => $item->product_code,
-                                'barcode' => $item->barcode,
-                                'product_name' => $item->product_name,
-                                'quantity' => (int) $item->quantity,
-                                'unit_price' => (float) $item->unit_price,
-                                'status' => $item->status,
-                                'is_flagged' => (bool) $item->is_flagged,
-                                'flag_reason' => $item->flag_reason,
-                            ];
-                        })->values() : [],
-                    ] : null,
-                    'driver' => $assignment->driver,
-                ];
+                return $this->formatAssignmentData($assignment);
             });
 
             return response()->json([
@@ -938,7 +886,7 @@ class DeliveryManagementController extends Controller
             }
 
             $query = OrderDriverAssigned::where('assigned_driver_user_id', $driver_user_id)
-                ->with(['order.items', 'order.payment']);
+                ->with(['order.items.installation', 'order.payment', 'driver']);
 
             if ($request->has('driver_status')) {
                 $query->where('driver_status', $request->query('driver_status'));
@@ -947,92 +895,7 @@ class DeliveryManagementController extends Controller
             $assignments = $query->orderBy('updated_at', 'desc')->get();
 
             $formattedAssignments = $assignments->map(function ($assignment) {
-                $order = $assignment->order;
-                if ($order) {
-                    $order->loadMissing('payment');
-                }
-
-                $paymentStatus = $assignment->payment_status
-                    ?: ($order?->payment?->payment_status ?: ($order?->payment_status ?: 'pending'));
-                $paymentType = $assignment->payment_method
-                    ?: ($order?->payment?->payment_method ?: ($order?->payment_method ?: 'N/A'));
-                $totalAmount = $order ? (float) ($order->payment?->total_price ?: $order->total_amount) : 0.00;
-                $paidAmount = $order && $order->payment
-                    ? (float) $order->payment->paid_amount
-                    : ($order ? (float) ($order->collected_amount ?? 0.00) : 0.00);
-                $totalOutstanding = $order && $order->payment
-                    ? (float) $order->payment->total_outstanding
-                    : max(0.00, $totalAmount - $paidAmount);
-                $currency = $order?->payment?->currency ?: 'QAR';
-
-                $bagCount = $order ? (int) ($order->bag_count ?? 0) : 0;
-                $itemsCount = $order && $order->items ? $order->items->count() : 0;
-
-                return [
-                    'id' => $assignment->id,
-                    'order_id' => $assignment->order_id,
-                    'order_number' => $assignment->order_number,
-                    'assigned_driver_user_id' => $assignment->assigned_driver_user_id ? (int) $assignment->assigned_driver_user_id : null,
-                    'driver_name' => $assignment->driver_name,
-                    'zone' => $assignment->zone,
-                    'order_status' => $assignment->order_status,
-                    'driver_status' => $assignment->driver_status,
-                    'payment_status' => $paymentStatus,
-                    'payment_type' => $paymentType,
-                    'payment_method' => $paymentType,
-                    'total_amount' => $totalAmount,
-                    'paid_amount' => $paidAmount,
-                    'collected_amount' => $paidAmount,
-                    'total_outstanding' => $totalOutstanding,
-                    'outstanding_amount' => $totalOutstanding,
-                    'currency' => $currency,
-                    'bag_count' => $bagCount,
-                    'items_count' => $itemsCount,
-                    'total_items' => $itemsCount,
-                    'assigned_at' => $assignment->assigned_at ? $assignment->assigned_at->toIso8601String() : null,
-                    'accepted_at' => $assignment->accepted_at ? $assignment->accepted_at->toIso8601String() : null,
-                    'started_at' => $assignment->started_at ? $assignment->started_at->toIso8601String() : null,
-                    'delivered_at' => $assignment->delivered_at ? $assignment->delivered_at->toIso8601String() : null,
-                    'cancelled_at' => $assignment->cancelled_at ? $assignment->cancelled_at->toIso8601String() : null,
-                    'refund_at' => $assignment->refund_at ? $assignment->refund_at->toIso8601String() : null,
-                    'exchange_at' => $assignment->exchange_at ? $assignment->exchange_at->toIso8601String() : null,
-                    'created_at' => $assignment->created_at ? $assignment->created_at->toIso8601String() : null,
-                    'updated_at' => $assignment->updated_at ? $assignment->updated_at->toIso8601String() : null,
-                    'order' => $order ? [
-                        'id' => $order->id,
-                        'order_number' => $order->order_number,
-                        'customer_name' => $order->customer_name ?? 'N/A',
-                        'customer_phone' => $order->customer_phone ?? 'N/A',
-                        'delivery_address' => $order->delivery_address ?? 'N/A',
-                        'total_amount' => $totalAmount,
-                        'payment_status' => $paymentStatus,
-                        'payment_type' => $paymentType,
-                        'payment_method' => $paymentType,
-                        'paid_amount' => $paidAmount,
-                        'collected_amount' => $paidAmount,
-                        'total_outstanding' => $totalOutstanding,
-                        'outstanding_amount' => $totalOutstanding,
-                        'currency' => $currency,
-                        'status' => $order->status,
-                        'bag_count' => $bagCount,
-                        'items_count' => $itemsCount,
-                        'total_items' => $itemsCount,
-                        'created_at' => $order->created_at ? $order->created_at->toIso8601String() : null,
-                        'items' => $order->items ? $order->items->map(function ($item) {
-                            return [
-                                'item_id' => $item->id,
-                                'line_item_id' => $item->line_item_id,
-                                'product_id' => $item->product_id,
-                                'product_code' => $item->product_code,
-                                'barcode' => $item->barcode,
-                                'product_name' => $item->product_name,
-                                'quantity' => (int) $item->quantity,
-                                'unit_price' => (float) $item->unit_price,
-                                'status' => $item->status,
-                            ];
-                        })->values() : [],
-                    ] : null,
-                ];
+                return $this->formatAssignmentData($assignment);
             });
 
             return response()->json([
@@ -1066,7 +929,7 @@ class DeliveryManagementController extends Controller
                 ?? $request->query('driver_user_id')
                 ?? $request->query('assigned_driver_user_id');
 
-            $query = OrderDriverAssigned::with(['order.items', 'order.payment', 'driver'])
+            $query = OrderDriverAssigned::with(['order.items.installation', 'order.payment', 'driver'])
                 ->where('driver_status', 'started');
 
             if (!empty($driverId)) {
@@ -1083,91 +946,7 @@ class DeliveryManagementController extends Controller
             $assignments = $query->orderBy('started_at', 'desc')->orderBy('updated_at', 'desc')->get();
 
             $formattedAssignments = $assignments->map(function ($assignment) {
-                $order = $assignment->order;
-                if ($order) {
-                    $order->loadMissing('payment');
-                }
-
-                $paymentStatus = $assignment->payment_status
-                    ?: ($order?->payment?->payment_status ?: ($order?->payment_status ?: 'pending'));
-                $paymentType = $assignment->payment_method
-                    ?: ($order?->payment?->payment_method ?: ($order?->payment_method ?: 'N/A'));
-                $totalAmount = $order ? (float) ($order->payment?->total_price ?: $order->total_amount) : 0.00;
-                $paidAmount = $order && $order->payment
-                    ? (float) $order->payment->paid_amount
-                    : ($order ? (float) ($order->collected_amount ?? 0.00) : 0.00);
-                $totalOutstanding = $order && $order->payment
-                    ? (float) $order->payment->total_outstanding
-                    : max(0.00, $totalAmount - $paidAmount);
-                $currency = $order?->payment?->currency ?: 'QAR';
-
-                $bagCount = $order ? (int) ($order->bag_count ?? 0) : 0;
-                $itemsCount = $order && $order->items ? $order->items->count() : 0;
-
-                return [
-                    'id' => $assignment->id,
-                    'order_id' => $assignment->order_id,
-                    'order_number' => $assignment->order_number,
-                    'assigned_driver_user_id' => $assignment->assigned_driver_user_id ? (int) $assignment->assigned_driver_user_id : null,
-                    'driver_name' => $assignment->driver_name,
-                    'zone' => $assignment->zone,
-                    'order_status' => $assignment->order_status,
-                    'driver_status' => $assignment->driver_status,
-                    'payment_status' => $paymentStatus,
-                    'payment_type' => $paymentType,
-                    'payment_method' => $paymentType,
-                    'total_amount' => $totalAmount,
-                    'paid_amount' => $paidAmount,
-                    'collected_amount' => $paidAmount,
-                    'total_outstanding' => $totalOutstanding,
-                    'outstanding_amount' => $totalOutstanding,
-                    'currency' => $currency,
-                    'bag_count' => $bagCount,
-                    'items_count' => $itemsCount,
-                    'total_items' => $itemsCount,
-                    'assigned_at' => $assignment->assigned_at ? $assignment->assigned_at->toIso8601String() : null,
-                    'accepted_at' => $assignment->accepted_at ? $assignment->accepted_at->toIso8601String() : null,
-                    'started_at' => $assignment->started_at ? $assignment->started_at->toIso8601String() : null,
-                    'delivered_at' => $assignment->delivered_at ? $assignment->delivered_at->toIso8601String() : null,
-                    'created_at' => $assignment->created_at ? $assignment->created_at->toIso8601String() : null,
-                    'updated_at' => $assignment->updated_at ? $assignment->updated_at->toIso8601String() : null,
-                    'order' => $order ? [
-                        'id' => $order->id,
-                        'order_number' => $order->order_number,
-                        'customer_name' => $order->customer_name ?? 'N/A',
-                        'customer_phone' => $order->customer_phone ?? 'N/A',
-                        'delivery_address' => $order->delivery_address ?? 'N/A',
-                        'total_amount' => $totalAmount,
-                        'payment_status' => $paymentStatus,
-                        'payment_type' => $paymentType,
-                        'payment_method' => $paymentType,
-                        'paid_amount' => $paidAmount,
-                        'collected_amount' => $paidAmount,
-                        'total_outstanding' => $totalOutstanding,
-                        'outstanding_amount' => $totalOutstanding,
-                        'currency' => $currency,
-                        'status' => $order->status,
-                        'bag_count' => $bagCount,
-                        'items_count' => $itemsCount,
-                        'total_items' => $itemsCount,
-                        'created_at' => $order->created_at ? $order->created_at->toIso8601String() : null,
-                        'items' => $order->items ? $order->items->map(function ($item) {
-                            return [
-                                'item_id' => $item->id,
-                                'line_item_id' => $item->line_item_id,
-                                'product_id' => $item->product_id,
-                                'product_code' => $item->product_code,
-                                'barcode' => $item->barcode,
-                                'product_name' => $item->product_name,
-                                'quantity' => (int) $item->quantity,
-                                'unit_price' => (float) $item->unit_price,
-                                'status' => $item->status,
-                                'is_packer_verified' => (bool) $item->is_packer_verified,
-                            ];
-                        })->values() : [],
-                    ] : null,
-                    'driver' => $assignment->driver,
-                ];
+                return $this->formatAssignmentData($assignment);
             });
 
             return response()->json([
@@ -1393,6 +1172,7 @@ class DeliveryManagementController extends Controller
         $order = $assignment->order;
         if ($order) {
             $order->loadMissing('payment');
+            $order->loadMissing('items.installation');
         }
 
         $paymentStatus = $assignment->payment_status
@@ -1409,9 +1189,38 @@ class DeliveryManagementController extends Controller
         $currency = $order?->payment?->currency ?: 'QAR';
 
         $bagCount = $order ? (int) ($order->bag_count ?? 0) : 0;
-        $itemsCount = $order && $order->items ? $order->items->count() : 0;
-        $totalItems = $itemsCount;
-        $verifiedItemsCount = $order && $order->items ? $order->items->where('is_packer_verified', true)->count() : 0;
+        $orderItems = $order && $order->items ? $order->items : collect();
+        $totalOrderItemsCount = $orderItems->count();
+
+        $assignedDriverId = $assignment->assigned_driver_user_id ? (int) $assignment->assigned_driver_user_id : null;
+        $installationItemsCount = 0;
+        $unassignedInstallationCount = 0;
+        $visibleItems = collect();
+
+        foreach ($orderItems as $item) {
+            $isInstall = $this->isInstallationItem($item);
+            if ($isInstall) {
+                $installationItemsCount++;
+            }
+
+            $isAssignedToThisDriver = ($assignedDriverId !== null && (int) $item->delivered_by === $assignedDriverId);
+
+            // Rule: If item has installation and driver is not yet assigned in delivered_by,
+            // don't give response in that item to driver. If same driver assigned in delivered_by, then show.
+            if ($isInstall && !$isAssignedToThisDriver) {
+                $unassignedInstallationCount++;
+                continue;
+            }
+
+            $visibleItems->push($item);
+        }
+
+        $isPartialDelivery = ($unassignedInstallationCount > 0)
+            || ($order && $order->status === 'partial_assigned_driver')
+            || ($assignment->order_status === 'partial_assigned_driver');
+
+        $driverItemsCount = $visibleItems->count();
+        $verifiedItemsCount = $visibleItems->where('is_packer_verified', true)->count();
         $isBagVerified = (bool) ($assignment->is_bag_verified ?? $order?->is_bag_verified ?? false);
 
         $discrepancy = $order ? OrderItemDiscrepancy::where('order_id', $order->id)->latest()->first() : null;
@@ -1420,11 +1229,16 @@ class DeliveryManagementController extends Controller
             'id' => $assignment->id,
             'order_id' => $assignment->order_id,
             'order_number' => $assignment->order_number,
-            'assigned_driver_user_id' => $assignment->assigned_driver_user_id ? (int) $assignment->assigned_driver_user_id : null,
+            'assigned_driver_user_id' => $assignedDriverId,
             'driver_name' => $assignment->driver_name,
             'zone' => $assignment->zone,
             'order_status' => $assignment->order_status,
             'driver_status' => $assignment->driver_status,
+            'partial_delivery' => $isPartialDelivery,
+            'is_partial_delivery' => $isPartialDelivery,
+            'has_installation' => $installationItemsCount > 0,
+            'installation_items_count' => $installationItemsCount,
+            'unassigned_installation_items_count' => $unassignedInstallationCount,
             'payment_status' => $paymentStatus,
             'payment_type' => $paymentType,
             'payment_method' => $paymentType,
@@ -1435,8 +1249,10 @@ class DeliveryManagementController extends Controller
             'outstanding_amount' => $totalOutstanding,
             'currency' => $currency,
             'bag_count' => $bagCount,
-            'items_count' => $itemsCount,
-            'total_items' => $totalItems,
+            'items_count' => $driverItemsCount,
+            'total_items' => $driverItemsCount,
+            'total_order_items' => $totalOrderItemsCount,
+            'product_tag' => $this->getOrderProductTag($order),
             'verified_items_count' => $verifiedItemsCount,
             'is_bag_verified' => $isBagVerified,
             'assigned_at' => $assignment->assigned_at ? $assignment->assigned_at->toIso8601String() : null,
@@ -1476,14 +1292,21 @@ class DeliveryManagementController extends Controller
             'total_outstanding' => $totalOutstanding,
             'outstanding_amount' => $totalOutstanding,
             'currency' => $currency,
+            'product_tag' => $this->getOrderProductTag($order),
             'status' => $order->status,
+            'partial_delivery' => $isPartialDelivery,
+            'is_partial_delivery' => $isPartialDelivery,
+            'has_installation' => $installationItemsCount > 0,
+            'installation_items_count' => $installationItemsCount,
+            'unassigned_installation_items_count' => $unassignedInstallationCount,
             'bag_count' => $bagCount,
-            'items_count' => $itemsCount,
-            'total_items' => $totalItems,
+            'items_count' => $driverItemsCount,
+            'total_items' => $driverItemsCount,
+            'total_order_items' => $totalOrderItemsCount,
             'verified_items_count' => $verifiedItemsCount,
             'is_bag_verified' => $isBagVerified,
             'created_at' => $order->created_at ? $order->created_at->toIso8601String() : null,
-            'items' => $order->items ? $order->items->map(function ($item) {
+            'items' => $visibleItems->map(function ($item) {
                 return [
                     'item_id' => $item->id,
                     'line_item_id' => $item->line_item_id,
@@ -1491,19 +1314,131 @@ class DeliveryManagementController extends Controller
                     'product_code' => $item->product_code,
                     'barcode' => $item->barcode,
                     'product_name' => $item->product_name,
+                    'product_tag' => $this->getProductTag($item),
                     'quantity' => (int) $item->quantity,
                     'unit_price' => (float) $item->unit_price,
                     'status' => $item->status,
+                    'delivered_by' => $item->delivered_by ? (int) $item->delivered_by : null,
+                    'delivered_user_name' => $item->delivered_user_name,
                     'is_packer_verified' => (bool) $item->is_packer_verified,
                     'is_flagged' => (bool) $item->is_flagged,
                     'flag_reason' => $item->flag_reason,
+                    'is_installable' => (bool) ($item->is_installable ?? false) || $this->isInstallationItem($item),
+                    'has_installation' => $this->isInstallationItem($item),
                 ];
-            })->values() : [],
+            })->values(),
         ] : null;
 
         $data['driver'] = $assignment->driver;
 
         return $data;
+    }
+
+    /**
+     * Helper to determine if an item is an installation item.
+     */
+    protected function isInstallationItem($item): bool
+    {
+        if (!$item) {
+            return false;
+        }
+
+        $attributes = is_array($item) ? $item : $item->getAttributes();
+
+        $truthy = static function ($value): bool {
+            return in_array(
+                strtolower(trim((string) $value)),
+                ['1', 'true', 'yes'],
+                true
+            );
+        };
+
+        if (
+            $truthy($attributes['is_installable'] ?? false) ||
+            $truthy($attributes['is_installation'] ?? false) ||
+            $truthy($attributes['installation_required'] ?? false)
+        ) {
+            return true;
+        }
+
+        if (is_object($item)) {
+            if ($item->relationLoaded('installation')) {
+                if (!empty($item->installation)) {
+                    return true;
+                }
+            } elseif (method_exists($item, 'installation') && !empty($item->installation)) {
+                return true;
+            }
+            if (!empty($item->is_installable)) {
+                return true;
+            }
+        }
+
+        $searchFields = [
+            'product_name',
+            'product_code',
+            'barcode',
+            'vendor',
+            'vendor_name',
+            'product_type',
+            'item_type',
+            'product_tags',
+            'tags',
+            'category',
+            'type',
+        ];
+
+        $text = '';
+        foreach ($searchFields as $field) {
+            if (isset($attributes[$field])) {
+                $text .= ' ' . strtolower((string) $attributes[$field]);
+            }
+        }
+
+        return (bool) preg_match('/\binstallation\b|\binstallations\b/', $text);
+    }
+
+    /**
+     * Helper to determine product_tag ('VS' or null) for an item
+     */
+    protected function getProductTag($item): ?string
+    {
+        $productTags = is_string($item) ? $item : ($item->product_tags ?? '');
+        if (empty($productTags)) {
+            return null;
+        }
+
+        $tags = array_map('trim', explode(',', (string) $productTags));
+        foreach ($tags as $tag) {
+            if (strcasecmp($tag, 'vs') === 0) {
+                return 'VS';
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Helper to determine order-level product_tag ('VS' if any item has VS tag, else null)
+     */
+    protected function getOrderProductTag($order): ?string
+    {
+        if (!$order) {
+            return null;
+        }
+
+        $items = $order->relationLoaded('items') ? $order->items : ($order->items ?? null);
+        if (!$items) {
+            return null;
+        }
+
+        foreach ($items as $item) {
+            if ($this->getProductTag($item) === 'VS') {
+                return 'VS';
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -1616,6 +1551,7 @@ class DeliveryManagementController extends Controller
                 'order_number' => $order->order_number,
                 'order_id' => $order->id,
                 'status' => $order->status,
+                'product_tag' => $this->getOrderProductTag($order),
                 'bag_count' => $bagCount,
                 'verified_bag_count' => $bagCount,
                 'items_count' => $totalItems,
@@ -1629,6 +1565,7 @@ class DeliveryManagementController extends Controller
                         'line_item_id' => $item->line_item_id,
                         'product_name' => $item->product_name,
                         'barcode' => $item->barcode,
+                        'product_tag' => $this->getProductTag($item),
                         'status' => $item->status,
                         'is_packer_verified' => (bool) $item->is_packer_verified,
                         'packer_verified_at' => $item->packer_verified_at ? $item->packer_verified_at->toIso8601String() : null,
@@ -1797,6 +1734,7 @@ class DeliveryManagementController extends Controller
                         'order_number' => $assignment->order_number,
                         'driver_status' => $assignment->driver_status,
                         'order_status' => $assignment->order_status,
+                        'product_tag' => $this->getOrderProductTag($order),
                         'total_amount' => (float) ($order ? $order->total_amount : 0.00),
                         'cancelled_items_count' => $cancelledItems->count(),
                         'remaining_items_count' => $remainingItems->count(),
@@ -1804,6 +1742,7 @@ class DeliveryManagementController extends Controller
                             'item_id' => $item->id,
                             'line_item_id' => $item->line_item_id,
                             'product_name' => $item->product_name,
+                            'product_tag' => $this->getProductTag($item),
                             'quantity' => (int) $item->quantity,
                             'unit_price' => (float) $item->unit_price,
                             'status' => $item->status,
@@ -1813,6 +1752,7 @@ class DeliveryManagementController extends Controller
                             'item_id' => $item->id,
                             'line_item_id' => $item->line_item_id,
                             'product_name' => $item->product_name,
+                            'product_tag' => $this->getProductTag($item),
                             'quantity' => (int) $item->quantity,
                             'unit_price' => (float) $item->unit_price,
                             'status' => $item->status,
@@ -1869,6 +1809,7 @@ class DeliveryManagementController extends Controller
                         'item_id' => $i->id,
                         'line_item_id' => $i->line_item_id,
                         'product_name' => $i->product_name,
+                        'product_tag' => $this->getProductTag($i),
                         'status' => $i->status,
                     ])->values(),
                 ], 422);
@@ -1898,6 +1839,7 @@ class DeliveryManagementController extends Controller
                         'item_id' => $i->id,
                         'line_item_id' => $i->line_item_id,
                         'product_name' => $i->product_name,
+                        'product_tag' => $this->getProductTag($i),
                         'status' => $i->status,
                     ])->values(),
                 ], 404);
@@ -1912,6 +1854,7 @@ class DeliveryManagementController extends Controller
                     'delivered_items' => $alreadyDeliveredItems->map(fn($i) => [
                         'item_id' => $i->id,
                         'product_name' => $i->product_name,
+                        'product_tag' => $this->getProductTag($i),
                         'status' => $i->status,
                     ])->values(),
                 ], 400);
@@ -1953,6 +1896,7 @@ class DeliveryManagementController extends Controller
                     'line_item_id' => $item->line_item_id,
                     'product_name' => $item->product_name,
                     'barcode' => $item->barcode,
+                    'product_tag' => $this->getProductTag($item),
                     'quantity' => (int) $item->quantity,
                     'unit_price' => (float) $item->unit_price,
                     'status' => 'cancelled',
@@ -1995,7 +1939,7 @@ class DeliveryManagementController extends Controller
                 } else {
                     $assignment->order_status = $order->status;
                     // Recalculate collected amount for driver collection if COD
-                    if ($assignment->payment_method === 'cash' || str_contains(strtolower((string)$assignment->payment_method), 'cod')) {
+                    if ($assignment->payment_method === 'cash' || str_contains(strtolower((string) $assignment->payment_method), 'cod')) {
                         $assignment->collected_amount = $newRemainingTotalAmount;
                     }
                 }
@@ -2052,6 +1996,7 @@ class DeliveryManagementController extends Controller
                 'line_item_id' => $item->line_item_id,
                 'product_name' => $item->product_name,
                 'barcode' => $item->barcode,
+                'product_tag' => $this->getProductTag($item),
                 'quantity' => (int) $item->quantity,
                 'unit_price' => (float) $item->unit_price,
                 'status' => $item->status,
@@ -2069,6 +2014,7 @@ class DeliveryManagementController extends Controller
                     'order_id' => $order->id,
                     'order_number' => $order->order_number,
                     'order_status' => $order->status,
+                    'product_tag' => $this->getOrderProductTag($order),
                     'driver_status' => $assignment ? $assignment->driver_status : null,
                     'driver_notification' => $driverNotification,
                     'original_total_amount' => $originalTotalAmount,

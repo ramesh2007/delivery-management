@@ -7,6 +7,7 @@ use Illuminate\Http\Request;
 use App\Models\Order;
 use App\Services\ShopifyService;
 use App\Services\OrderDetailsService;
+use Illuminate\Support\Facades\Cache;
 
 class OrderStatusApiController extends Controller
 {
@@ -28,14 +29,27 @@ class OrderStatusApiController extends Controller
             return;
         }
 
-        if ($request->boolean('auto_sync', true)) {
-            try {
-                $this->shopifyService->syncOrdersToDatabase();
-            } catch (\Throwable $e) {
-                \Illuminate\Support\Facades\Log::warning("Shopify handleSilentSync Exception: " . $e->getMessage(), [
-                    'file' => $e->getFile(),
-                    'line' => $e->getLine(),
-                ]);
+        $force = $request->boolean('auto_sync', false) 
+            || $request->boolean('sync', false) 
+            || $request->boolean('refresh', false)
+            || $request->has('nocache');
+
+        $cooldownKey = 'shopify_orders_silent_sync_cooldown';
+        $lockKey = 'shopify_orders_sync_lock';
+
+        if ($force || !Cache::has($cooldownKey)) {
+            if (Cache::add($lockKey, true, now()->addMinutes(1))) {
+                try {
+                    Cache::put($cooldownKey, true, now()->addSeconds(20));
+                    $this->shopifyService->syncOrdersToDatabase(params: ['limit' => 15]);
+                } catch (\Throwable $e) {
+                    \Illuminate\Support\Facades\Log::warning("Shopify handleSilentSync Exception: " . $e->getMessage(), [
+                        'file' => $e->getFile(),
+                        'line' => $e->getLine(),
+                    ]);
+                } finally {
+                    Cache::forget($lockKey);
+                }
             }
         }
     }
@@ -132,6 +146,7 @@ class OrderStatusApiController extends Controller
 
         $paginator = $this->getBaseOrderQuery($request)
             ->orderBy('created_at', 'desc')
+            ->orderBy('id', 'desc')
             ->paginate($perPage);
 
         return $this->buildPaginatedResponse($paginator, 'all', 'All orders retrieved successfully.');
@@ -159,75 +174,73 @@ class OrderStatusApiController extends Controller
         $this->handleSilentSync($request);
 
         $perPage = max(1, min((int) $request->query('per_page', 15), 100));
+        $search = trim((string) $request->query('search', ''));
 
-        $paginator = $this->getBaseOrderQuery($request)
+        $query = Order::with(['payment', 'items'])
             ->where('status', 'pending')
-            ->orderBy('created_at', 'desc')
-            ->paginate($perPage);
+            ->where(function ($q) {
+                $q->whereNull('shopify_status')
+                  ->orWhere('shopify_status', '!=', 'cancelled');
+            })
+            ->whereNull('cancelled_at');
+
+        if (!empty($search)) {
+            $query->where(function ($q) use ($search) {
+                $q->where('order_number', 'like', "%{$search}%")
+                  ->orWhere('customer_name', 'like', "%{$search}%")
+                  ->orWhere('customer_phone', 'like', "%{$search}%")
+                  ->orWhereHas('payment', function ($pq) use ($search) {
+                      $pq->where('shopify_order_id', 'like', "%{$search}%");
+                  });
+            });
+        }
+
+        $paginator = $query->orderBy('created_at', 'desc')->orderBy('id', 'desc')->paginate($perPage);
 
         $data = $paginator->getCollection()->map(function ($order) {
-
             return [
-
                 // =========================
                 // ORDER
                 // =========================
-
                 'order_id' => $order->id,
                 'order_number' => $order->order_number,
                 'status' => $order->status,
-                // 'bag_count' => (int) ($order->bag_count ?? 0),
+                'shopify_status' => $order->shopify_status,
+                'cancelled_at' => $order->cancelled_at ? $order->cancelled_at->toIso8601String() : null,
+                'notes' => $order->notes,
 
                 // =========================
                 // CUSTOMER
                 // =========================
-
                 'customer' => [
                     'name' => $order->customer_name ?? 'N/A',
                     'phone' => $order->customer_phone ?? 'N/A',
-                    // 'delivery_address' => $order->delivery_address ?? 'N/A',
                 ],
 
                 // =========================
                 // PAYMENT
                 // =========================
-
                 'payment' => $order->payment ? [
-                    // 'id' => $order->payment->id,
                     'shopify_order_id' => $order->payment->shopify_order_id,
-                    // 'payment_method' => $order->payment->payment_method,
                     'payment_status' => $order->payment->payment_status,
-                    // 'paid_amount' => (float) $order->payment->paid_amount,
                     'total_price' => (float) $order->payment->total_price,
-                    // 'total_outstanding' => (float) $order->payment->total_outstanding,
                     'currency' => $order->payment->currency,
-
                     'processed_at' => $order->payment->processed_at
                         ? $order->payment->processed_at->toIso8601String()
                         : null,
-
                     'shopify_created_at' => $order->payment->shopify_created_at
                         ? $order->payment->shopify_created_at->toIso8601String()
                         : null,
-
                     'shopify_updated_at' => $order->payment->shopify_updated_at
                         ? $order->payment->shopify_updated_at->toIso8601String()
                         : null,
-
                 ] : [
-                    // 'payment_method' => $order->payment_method,
-                    // 'payment_status' => $order->payment_status,
-                    // 'paid_amount' => (float) ($order->collected_amount ?? 0.00),
                     'total_price' => (float) $order->total_amount,
-                    // 'total_outstanding' => (float) $order->total_amount,
-                    // 'currency' => 'QAR',
-                    // 'processed_at' => null,
                 ],
 
                 // =========================
                 // SUMMARY
                 // =========================
-
                 'summary' => [
                     'total_amount' => (float) $order->total_amount,
                     'total_items' => $order->items->count(),
@@ -236,58 +249,29 @@ class OrderStatusApiController extends Controller
                 // =========================
                 // ITEMS
                 // =========================
-
                 'items' => $order->items->map(function ($item) {
-
                     return [
-
                         'item_id' => $item->id,
                         'line_item_id' => $item->line_item_id,
-                        // 'product_id' => $item->product_id,
-
-                        // 'product_code' => $item->product_code,
-                        // 'barcode' => $item->barcode,
-                        // 'product_name' => $item->product_name,
-
-                        // 'image' => $item->image,
-                        // 'image_url' => $item->image,
-
-                        // 'quantity' => $item->quantity,
-                        // 'unit_price' => (float) $item->unit_price,
-
-                        // 'is_installable' => (bool) $item->is_installable,
-
-                        // 'installation_type' => $item->installation
-                        //     ? $item->installation->installation_type
-                        //     : null,
-
-                        // 'installation_level' => $item->installation
-                        //     ? $item->installation->installation_level
-                        //     : null,
-
-                        // 'installation' => $item->installation ? [
-                        //     'id' => $item->installation->id,
-                        //     'installation_type' => $item->installation->installation_type,
-                        //     'installation_level' => $item->installation->installation_level,
-                        //     'is_scheduled_assigned' => (bool) (
-                        //         $item->installation->is_scheduled_assigned ?? false
-                        //     ),
-                        // ] : null,
-
-                        // 'is_flagged' => (bool) $item->is_flagged,
-                        // 'flag_reason' => $item->flag_reason,
+                        'product_name' => $item->product_name,
+                        'product_code' => $item->product_code,
+                        'barcode' => $item->barcode,
+                        'quantity' => (int) $item->quantity,
+                        'unit_price' => (float) $item->unit_price,
+                        'image' => $item->image,
+                        'product_tags' => $item->product_tags,
+                        'gift_wrap' => $item->gift_wrap,
+                        'gift_message' => $item->gift_message,
+                        'is_installable' => (bool) $item->is_installable,
                     ];
-
                 })->values(),
 
                 // =========================
                 // TIMESTAMPS
                 // =========================
-
                 'created_at' => $order->created_at
                     ? $order->created_at->toIso8601String()
                     : null,
-
                 'updated_at' => $order->updated_at
                     ? $order->updated_at->toIso8601String()
                     : null,
@@ -296,6 +280,8 @@ class OrderStatusApiController extends Controller
 
         return response()->json([
             'success' => true,
+            'message' => 'New orders retrieved successfully.',
+            'status_filter' => 'new',
             'data' => $data,
             'pagination' => [
                 'current_page' => $paginator->currentPage(),
@@ -304,6 +290,9 @@ class OrderStatusApiController extends Controller
                 'last_page' => $paginator->lastPage(),
                 'from' => $paginator->firstItem(),
                 'to' => $paginator->lastItem(),
+                'has_more_pages' => $paginator->hasMorePages(),
+                'next_page_url' => $paginator->nextPageUrl(),
+                'prev_page_url' => $paginator->previousPageUrl(),
             ],
         ]);
     }
@@ -926,6 +915,8 @@ class OrderStatusApiController extends Controller
             $query->where(function ($q) {
                 $q->whereIn('status', ['cancelled', 'delivery_cancelled', 'cancelled_delivery', 'delivery_failed', 'failed'])
                     ->orWhere('status', 'like', '%cancel%')
+                    ->orWhere('shopify_status', 'cancelled')
+                    ->orWhereNotNull('cancelled_at')
                     ->orWhereHas('driverAssignment', function ($dq) {
                         $dq->whereIn('driver_status', ['cancelled', 'cancelled_delivery', 'delivery_failed', 'refund', 'failed']);
                     });
@@ -953,6 +944,11 @@ class OrderStatusApiController extends Controller
             return (bool) ($item->is_installable ?? false) || !empty($item->installation);
         })->count();
         $hasInstallation = $installationItems > 0;
+
+        $vsItemsCount = $order->items->filter(function ($item) {
+            return $this->orderDetailsService->isVirtualStockTag($item->product_tags);
+        })->count();
+        $readyAssign = ($totalItems > 0 && $vsItemsCount === $totalItems);
 
         // Unique Pickers
         $pickers = $order->items->map(function ($item) {
@@ -982,6 +978,9 @@ class OrderStatusApiController extends Controller
             'order_id' => $order->id,
             'order_number' => $order->order_number,
             'status' => $order->status,
+            'shopify_status' => $order->shopify_status,
+            'cancelled_at' => $order->cancelled_at ? $order->cancelled_at->toIso8601String() : null,
+            'notes' => $order->notes,
             'bag_count' => (int) ($order->bag_count ?? 0),
             'assigned_to' => $order->assigned_to ? (int) $order->assigned_to : null,
             'assigned_user_name' => $order->assigned_user_name ?: ($order->assignedUser->name ?? null),
@@ -1018,6 +1017,10 @@ class OrderStatusApiController extends Controller
                 ] : null),
             'pickers' => $pickers,
             'packers' => $packers,
+            'ready_assign' => (bool) $readyAssign,
+            'ready_to_assign' => (bool) $readyAssign,
+            'all_items_vs' => (bool) $readyAssign,
+            'vs_items_count' => (int) $vsItemsCount,
             'customer' => [
                 'name' => $order->customer_name ?? 'N/A',
                 'phone' => $order->customer_phone ?? 'N/A',
@@ -1031,6 +1034,10 @@ class OrderStatusApiController extends Controller
                 'delivered_items' => $deliveredItems,
                 'installation_items' => $installationItems,
                 'has_installation' => $hasInstallation,
+                'ready_assign' => (bool) $readyAssign,
+                'ready_to_assign' => (bool) $readyAssign,
+                'all_items_vs' => (bool) $readyAssign,
+                'vs_items_count' => (int) $vsItemsCount,
             ],
             'payment' => $order->payment ? [
                 'id' => $order->payment->id,
@@ -1053,7 +1060,8 @@ class OrderStatusApiController extends Controller
                 'currency' => 'QAR',
                 'processed_at' => null,
             ],
-            'items' => $order->items->map(function ($item) {
+            'items' => ($formattedItems = $order->items->map(function ($item) {
+                $isVs = $this->orderDetailsService->isVirtualStockTag($item->product_tags);
                 return [
                     'item_id' => $item->id,
                     'line_item_id' => $item->line_item_id,
@@ -1062,9 +1070,10 @@ class OrderStatusApiController extends Controller
                     'barcode' => $item->barcode,
                     'product_name' => $item->product_name,
                     'image' => $item->image,
-                    'image_url' => $item->image,
-                    'product_image' => $item->image,
-                    'product_image_url' => $item->image,
+                    'product_tags' => $item->product_tags,
+                    'gift_wrap' => $item->gift_wrap,
+                    'gift_message' => $item->gift_message,
+                    'is_vs' => $isVs,
                     'quantity' => $item->quantity,
                     'unit_price' => (float) $item->unit_price,
                     'status' => $item->status,
@@ -1118,7 +1127,8 @@ class OrderStatusApiController extends Controller
                     'packed_at' => $item->packed_at ? $item->packed_at->toIso8601String() : null,
                     'delivered_at' => $item->delivered_at ? $item->delivered_at->toIso8601String() : null,
                 ];
-            })->values(),
+            })->values()),
+            'line_items' => $formattedItems,
             'created_at' => $order->created_at ? $order->created_at->toIso8601String() : null,
             'updated_at' => $order->updated_at ? $order->updated_at->toIso8601String() : null,
         ];
@@ -1134,9 +1144,19 @@ class OrderStatusApiController extends Controller
                 ], 404);
             }
 
-            $result = $this->orderDetailsService->getOrderDetails($id);
+            $refresh = $request->boolean('refresh') || $request->has('nocache');
+            $cacheKey = "order_details_endpoint_" . md5(trim((string)$id));
+
+            if ($refresh) {
+                Cache::forget($cacheKey);
+            }
+
+            $result = Cache::remember($cacheKey, now()->addMinutes(2), function () use ($id) {
+                return $this->orderDetailsService->getOrderDetails($id);
+            });
 
             if (!$result['success'] || empty($result['data'])) {
+                Cache::forget($cacheKey);
                 return response()->json([
                     'status' => false,
                     'message' => 'Order not found',

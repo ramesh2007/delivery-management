@@ -5,6 +5,10 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasManyThrough;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+
 
 class OrderInstallation extends Model
 {
@@ -38,10 +42,38 @@ class OrderInstallation extends Model
     }
 
     /**
+     * Get the order through order item.
+     */
+    public function order(): HasOneThrough
+    {
+        return $this->hasOneThrough(Order::class, OrderItem::class, 'id', 'id', 'order_item_id', 'order_id');
+    }
+
+    /**
      * Get the technician schedule associated with this installation.
      */
-    public function technicianSchedule()
+    public function technicianSchedule(): HasOne
     {
         return $this->hasOne(TechnicianScheduled::class, 'order_installation_id');
+    }
+
+    /**
+     * Get all historical schedules for this installation through technician schedule.
+     */
+    public function scheduleHistories(): HasManyThrough
+    {
+        return $this->hasManyThrough(TechnicianScheduleHistory::class, TechnicianScheduled::class, 'order_installation_id', 'technician_scheduled_id');
+    }
+    /**
+     * Get the installation proof image records associated with this installation.
+     */
+    public function installationImages(): HasMany
+    {
+        return $this->hasMany(InstallationImage::class, 'order_installation_id');
+    }
+
+    public function proofImages(): HasMany
+    {
+        return $this->hasMany(InstallationImage::class, 'order_installation_id');
     }
 }

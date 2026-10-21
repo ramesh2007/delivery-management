@@ -11,3 +11,6 @@ Artisan::command('inspire', function () {
 // Schedule Shopify orders sync to run automatically every minute
 Schedule::command('shopify:sync-orders')->everyMinute();
 
+// Schedule Shopify fulfillments sync for delivered/completed orders every 5 minutes
+Schedule::command('shopify:sync-fulfillments --all-delivered')->everyFiveMinutes();
+

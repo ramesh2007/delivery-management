@@ -13,14 +13,17 @@ class SyncShopifyOrdersCommand extends Command
      *
      * @var string
      */
-    protected $signature = 'shopify:sync-orders';
+    protected $signature = 'shopify:sync-orders 
+                            {--all : Sync recent orders bypassing incremental filter} 
+                            {--limit=50 : Limit number of orders to fetch per batch} 
+                            {--since= : Fetch orders updated since ISO8601 timestamp}';
 
     /**
      * The console command description.
      *
      * @var string
      */
-    protected $description = 'Sync orders and line items from Shopify API into local database';
+    protected $description = 'Sync orders and line items from Shopify API into local database with lean status updates';
 
     protected ShopifyService $shopifyService;
 
@@ -38,7 +41,18 @@ class SyncShopifyOrdersCommand extends Command
         $this->info('Starting Shopify orders sync...');
 
         try {
-            $result = $this->shopifyService->syncOrdersToDatabase();
+            $params = [];
+            if ($this->option('all')) {
+                $params['all'] = true;
+            }
+            if ($this->option('limit')) {
+                $params['limit'] = (int) $this->option('limit');
+            }
+            if ($this->option('since')) {
+                $params['updated_at_min'] = $this->option('since');
+            }
+
+            $result = $this->shopifyService->syncOrdersToDatabase(params: $params);
 
             if ($result['success']) {
                 $msg = "Shopify orders sync completed: {$result['orders_count']} orders, {$result['items_count']} items synced.";

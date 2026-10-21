@@ -8,6 +8,7 @@ use App\Models\OrderItem;
 use App\Models\OrderInstallation;
 use App\Models\OrderStatusLog;
 use App\Models\TechnicianScheduled;
+use App\Models\TechnicianScheduleHistory;
 use App\Models\User;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
@@ -73,6 +74,13 @@ class ScheduleTechnicianController extends Controller
                 : (isset($payload['duration']) ? (int) $payload['duration'] : null);
 
             $excludeId = $payload['exclude_id'] ?? $payload['schedule_id'] ?? null;
+            if (empty($excludeId)) {
+                if (!empty($payload['order_installation_id'])) {
+                    $excludeId = TechnicianScheduled::where('order_installation_id', $payload['order_installation_id'])->value('id');
+                } elseif (!empty($payload['order_item_id'])) {
+                    $excludeId = TechnicianScheduled::where('order_item_id', $payload['order_item_id'])->value('id');
+                }
+            }
 
             // Validate primary parameters
             if (empty($technicianId)) {
@@ -291,7 +299,7 @@ class ScheduleTechnicianController extends Controller
                 is_array($request->json()?->all()) ? $request->json()->all() : []
             );
 
-            // Enforce strictly required parameters for new schedule
+            // Enforce required parameters for schedule/reschedule
             $validator = Validator::make($payload, [
                 'order_id' => 'required',
                 'order_item_id' => 'required',
@@ -300,7 +308,9 @@ class ScheduleTechnicianController extends Controller
                 'scheduled_date' => 'required',
                 'start_time' => 'required',
 
-                // All rest are optional
+                // Optional parameters
+                'schedule_id' => 'nullable',
+                'technician_schedule_id' => 'nullable',
                 'end_time' => 'nullable',
                 'taken_time_in_mins' => 'nullable|integer',
                 'zone' => 'nullable|string',
@@ -314,6 +324,12 @@ class ScheduleTechnicianController extends Controller
                 'status' => 'nullable|string',
                 'notes' => 'nullable|string',
                 'images' => 'nullable',
+                'reschedule_reason' => 'nullable|string',
+                'reason' => 'nullable|string',
+                'is_reschedule' => 'nullable',
+                'user_id' => 'nullable',
+                'user_name' => 'nullable|string',
+                'force' => 'nullable',
             ]);
 
             if ($validator->fails()) {
@@ -414,10 +430,27 @@ class ScheduleTechnicianController extends Controller
 
             $timeRange = $this->resolveNormalizedTimes($parsedDate, $startTime, $endTime, $takenTimeMins);
 
+            // 6. Check if an existing schedule exists for this installation/item (Reschedule detection)
+            $existingSchedule = null;
+            $scheduleId = $payload['schedule_id'] ?? $payload['technician_schedule_id'] ?? $payload['id'] ?? null;
+            if (!empty($scheduleId)) {
+                $existingSchedule = TechnicianScheduled::find($scheduleId);
+            }
+            if (!$existingSchedule && !empty($orderInstallation?->id)) {
+                $existingSchedule = TechnicianScheduled::where('order_installation_id', $orderInstallation->id)
+                    ->latest('id')
+                    ->first();
+            }
+            if (!$existingSchedule && !empty($orderItem?->id)) {
+                $existingSchedule = TechnicianScheduled::where('order_item_id', $orderItem->id)
+                    ->latest('id')
+                    ->first();
+            }
+
             // Optional: check if technician is engaged unless force = true
             $force = filter_var($payload['force'] ?? false, FILTER_VALIDATE_BOOLEAN);
             if (!$force) {
-                $conflict = TechnicianScheduled::where('technician_id', $technicianId)
+                $conflictQuery = TechnicianScheduled::where('technician_id', $technicianId)
                     ->whereDate('scheduled_date', $parsedDate)
                     ->whereNotIn('status', ['cancelled', 'rejected'])
                     ->where(function ($q) use ($timeRange) {
@@ -425,9 +458,14 @@ class ScheduleTechnicianController extends Controller
                             $sub->where('start_time', '<', $timeRange['end_str'])
                                 ->where('end_time', '>', $timeRange['start_str']);
                         })->orWhere('start_time', $timeRange['start_str']);
-                    })
-                    ->first();
+                    });
 
+                // When rescheduling, exclude the existing record so it doesn't conflict with its own slot
+                if ($existingSchedule) {
+                    $conflictQuery->where('id', '!=', $existingSchedule->id);
+                }
+
+                $conflict = $conflictQuery->first();
                 if ($conflict) {
                     return response()->json([
                         'success' => false,
@@ -439,7 +477,7 @@ class ScheduleTechnicianController extends Controller
                 }
             }
 
-            // 6. Autofill optional location/customer fields from Order if not provided
+            // 7. Autofill optional location/customer fields from Order if not provided
             $zone = $payload['zone'] ?? $order->driverAssignment?->zone ?? null;
             $building = $payload['building'] ?? null;
             $unit = $payload['unit'] ?? null;
@@ -448,7 +486,9 @@ class ScheduleTechnicianController extends Controller
             $customerName = $payload['customer_name'] ?? $order->customer_name ?? null;
             $customerPhone = $payload['customer_phone'] ?? $order->customer_phone ?? null;
 
-            // 7. Create Schedule Record
+            $historyRecord = null;
+
+            // 8. Create or Reschedule Schedule Record inside DB Transaction
             $schedule = DB::transaction(function () use (
                 $order,
                 $orderItem,
@@ -464,78 +504,184 @@ class ScheduleTechnicianController extends Controller
                 $address,
                 $customerName,
                 $customerPhone,
-                $payload
+                $payload,
+                $existingSchedule,
+                &$historyRecord
             ) {
-                $record = TechnicianScheduled::create([
-                    'order_id' => $order->id,
-                    'order_number' => $order->order_number,
-                    'order_item_id' => $orderItem->id,
-                    'order_installation_id' => $orderInstallation->id,
-                    'technician_id' => $technicianId,
-                    'technician_name' => $technicianName,
-                    'scheduled_date' => $parsedDate,
-                    'start_time' => $timeRange['start_str'],
-                    'end_time' => $timeRange['end_str'],
-                    'taken_time_in_mins' => $timeRange['duration_mins'],
-                    'scheduled_at' => $timeRange['start_dt'],
-                    'zone' => $zone,
-                    'building' => $building,
-                    'unit' => $unit,
-                    'street' => $street,
-                    'address' => $address,
-                    'customer_name' => $customerName,
-                    'customer_phone' => $customerPhone,
-                    'status' => $payload['status'] ?? 'scheduled',
-                    'notes' => $payload['notes'] ?? null,
-                    'images' => $payload['images'] ?? null,
-                ]);
+                $currentUserId = Auth::id() ?? ($payload['user_id'] ?? null);
+                $currentUserName = Auth::user()?->name ?? ($payload['user_name'] ?? $technicianName ?? 'Admin');
+                $rescheduleReason = $payload['reschedule_reason'] ?? $payload['reason'] ?? null;
 
-                // Sync status with order_installations
-                $installationUpdates = ['is_scheduled_assigned' => true];
-                if (\Illuminate\Support\Facades\Schema::hasColumn('order_installations', 'status')) {
-                    $installationUpdates['status'] = 'scheduled';
-                }
-                $orderInstallation->update($installationUpdates);
+                if ($existingSchedule) {
+                    // =========================================================================
+                    // RESCHEDULE FLOW:
+                    // 1. Keep existing schedule data in technician_scheduled_history table
+                    // =========================================================================
+                    $prevScheduledDate = $existingSchedule->scheduled_date?->toDateString() ?? (string) $existingSchedule->scheduled_date;
+                    $prevStartTime = $existingSchedule->start_time;
+                    $prevOldStatus = $existingSchedule->status;
 
-                // Also update order item assignment if not set
-                if (empty($orderItem->assigned_to)) {
+                    if (class_exists(TechnicianScheduleHistory::class)) {
+                        $historyRecord = TechnicianScheduleHistory::create([
+                            'technician_scheduled_id' => $existingSchedule->id,
+                            'technician_id'           => $existingSchedule->technician_id,
+                            'technician_name'         => $existingSchedule->technician_name,
+                            'scheduled_date'          => $existingSchedule->scheduled_date,
+                            'start_time'              => $existingSchedule->start_time,
+                            'end_time'                => $existingSchedule->end_time,
+                            'taken_time_in_mins'      => $existingSchedule->taken_time_in_mins,
+                            'status'                  => $existingSchedule->status,
+                            'notes'                   => $existingSchedule->notes,
+                            'reschedule_reason'       => $rescheduleReason,
+                            'rescheduled_by'          => $currentUserId,
+                        ]);
+                    }
+
+                    // =========================================================================
+                    // 2. Update existing schedule with new schedule date and time in table
+                    // =========================================================================
+                    $newStatus = $payload['status'] ?? 'rescheduled';
+
+                    $updateData = [
+                        'technician_id'         => $technicianId,
+                        'technician_name'       => $technicianName,
+                        'scheduled_date'        => $parsedDate,
+                        'start_time'            => $timeRange['start_str'],
+                        'end_time'              => $timeRange['end_str'],
+                        'taken_time_in_mins'    => $timeRange['duration_mins'],
+                        'scheduled_at'          => $timeRange['start_dt'],
+                        'status'                => $newStatus,
+                    ];
+
+                    if (array_key_exists('zone', $payload)) $updateData['zone'] = $zone;
+                    if (array_key_exists('building', $payload)) $updateData['building'] = $building;
+                    if (array_key_exists('unit', $payload)) $updateData['unit'] = $unit;
+                    if (array_key_exists('street', $payload)) $updateData['street'] = $street;
+                    if (array_key_exists('address', $payload)) $updateData['address'] = $address;
+                    if (array_key_exists('customer_name', $payload)) $updateData['customer_name'] = $customerName;
+                    if (array_key_exists('customer_phone', $payload)) $updateData['customer_phone'] = $customerPhone;
+                    if (array_key_exists('notes', $payload)) $updateData['notes'] = $payload['notes'];
+                    if (array_key_exists('images', $payload)) $updateData['images'] = $payload['images'];
+
+                    $existingSchedule->update($updateData);
+                    $record = $existingSchedule;
+
+                    // Sync status with order_installations
+                    $installationUpdates = ['is_scheduled_assigned' => true];
+                    if (\Illuminate\Support\Facades\Schema::hasColumn('order_installations', 'status')) {
+                        $installationUpdates['status'] = $newStatus === 'scheduled' ? 'scheduled' : 'rescheduled';
+                    }
+                    $orderInstallation->update($installationUpdates);
+
+                    // Update order item assigned technician
                     $orderItem->update([
                         'assigned_to' => $technicianId,
                         'assigned_user_name' => $technicianName,
                     ]);
-                }
 
-                // Audit logging
-                try {
-                    if (class_exists(OrderStatusLog::class)) {
-                        OrderStatusLog::create([
-                            'order_id' => $order->id,
-                            'order_item_id' => $orderItem->id,
-                            'user_id' => Auth::id() ?? $technicianId,
-                            'user_name' => Auth::user()?->name ?? $technicianName ?? 'Admin',
-                            'action' => 'technician_scheduled',
-                            'new_status' => 'scheduled',
-                            'notes' => "Scheduled with technician {$technicianName} on {$parsedDate} at {$timeRange['start_str']}",
+                    // Audit logging in OrderStatusLog
+                    try {
+                        if (class_exists(OrderStatusLog::class)) {
+                            OrderStatusLog::create([
+                                'order_id' => $order->id,
+                                'order_item_id' => $orderItem->id,
+                                'user_id' => $currentUserId ?? $technicianId,
+                                'user_name' => $currentUserName,
+                                'action' => 'technician_rescheduled',
+                                'old_status' => $prevOldStatus,
+                                'new_status' => $newStatus,
+                                'notes' => "Rescheduled technician {$technicianName} from {$prevScheduledDate} {$prevStartTime} to {$parsedDate} at {$timeRange['start_str']}" . ($rescheduleReason ? ". Reason: {$rescheduleReason}" : ""),
+                            ]);
+                        }
+                    } catch (Throwable $logEx) {
+                        Log::warning('OrderStatusLog error in createSchedule (reschedule): ' . $logEx->getMessage());
+                    }
+
+                    return $record;
+
+                } else {
+                    // =========================================================================
+                    // INITIAL CREATION FLOW:
+                    // Create new schedule record in technician_scheduled table
+                    // =========================================================================
+                    $record = TechnicianScheduled::create([
+                        'order_id' => $order->id,
+                        'order_number' => $order->order_number,
+                        'order_item_id' => $orderItem->id,
+                        'order_installation_id' => $orderInstallation->id,
+                        'technician_id' => $technicianId,
+                        'technician_name' => $technicianName,
+                        'scheduled_date' => $parsedDate,
+                        'start_time' => $timeRange['start_str'],
+                        'end_time' => $timeRange['end_str'],
+                        'taken_time_in_mins' => $timeRange['duration_mins'],
+                        'scheduled_at' => $timeRange['start_dt'],
+                        'zone' => $zone,
+                        'building' => $building,
+                        'unit' => $unit,
+                        'street' => $street,
+                        'address' => $address,
+                        'customer_name' => $customerName,
+                        'customer_phone' => $customerPhone,
+                        'status' => $payload['status'] ?? 'scheduled',
+                        'notes' => $payload['notes'] ?? null,
+                        'images' => $payload['images'] ?? null,
+                    ]);
+
+                    // Sync status with order_installations
+                    $installationUpdates = ['is_scheduled_assigned' => true];
+                    if (\Illuminate\Support\Facades\Schema::hasColumn('order_installations', 'status')) {
+                        $installationUpdates['status'] = 'scheduled';
+                    }
+                    $orderInstallation->update($installationUpdates);
+
+                    // Also update order item assignment if not set
+                    if (empty($orderItem->assigned_to)) {
+                        $orderItem->update([
+                            'assigned_to' => $technicianId,
+                            'assigned_user_name' => $technicianName,
                         ]);
                     }
-                } catch (Throwable $logEx) {
-                    Log::warning('OrderStatusLog error in createSchedule: ' . $logEx->getMessage());
-                }
 
-                return $record;
+                    // Audit logging in OrderStatusLog
+                    try {
+                        if (class_exists(OrderStatusLog::class)) {
+                            OrderStatusLog::create([
+                                'order_id' => $order->id,
+                                'order_item_id' => $orderItem->id,
+                                'user_id' => $currentUserId ?? $technicianId,
+                                'user_name' => $currentUserName,
+                                'action' => 'technician_scheduled',
+                                'new_status' => 'scheduled',
+                                'notes' => "Scheduled with technician {$technicianName} on {$parsedDate} at {$timeRange['start_str']}",
+                            ]);
+                        }
+                    } catch (Throwable $logEx) {
+                        Log::warning('OrderStatusLog error in createSchedule: ' . $logEx->getMessage());
+                    }
+
+                    return $record;
+                }
             });
+
+            $isRescheduled = !empty($historyRecord);
 
             return response()->json([
                 'success' => true,
                 'status' => 'success',
-                'message' => 'Technician schedule created successfully.',
+                'is_rescheduled' => $isRescheduled,
+                'message' => $isRescheduled
+                    ? 'Technician schedule rescheduled successfully. Previous schedule data preserved in history.'
+                    : 'Technician schedule created successfully.',
                 'data' => $schedule->fresh([
                     'order:id,order_number,customer_name,status',
                     'orderItem:id,product_name,product_code,status',
                     'installation',
                     'technician:id,name,email,phone',
+                    'histories',
                 ]),
-            ], 201);
+                'history' => $historyRecord,
+            ], $isRescheduled ? 200 : 201);
 
         } catch (Throwable $e) {
             Log::error('Error in ScheduleTechnicianController@createSchedule: ' . $e->getMessage(), [
@@ -546,6 +692,92 @@ class ScheduleTechnicianController extends Controller
                 'success' => false,
                 'status' => 'error',
                 'message' => 'An error occurred while creating technician schedule: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Reschedule an existing technician schedule.
+     * Alias endpoint for createSchedule.
+     *
+     * Route: ANY /api/admin/technician-schedule/reschedule
+     */
+    public function rescheduleSchedule(Request $request): JsonResponse
+    {
+        return $this->createSchedule($request);
+    }
+
+    /**
+     * Get technician schedule reschedule history.
+     *
+     * Route: GET /api/admin/technician-schedule/history
+     */
+    public function scheduleHistory(Request $request): JsonResponse
+    {
+        try {
+            $query = TechnicianScheduleHistory::with([
+                'technicianSchedule.order:id,order_number,customer_name',
+                'technicianSchedule.orderItem:id,product_name,product_code',
+                'technicianSchedule.installation',
+                'technician:id,name,email,phone',
+                'rescheduledByUser:id,name,email',
+            ]);
+
+            if ($request->has('technician_scheduled_id')) {
+                $query->where('technician_scheduled_id', $request->input('technician_scheduled_id'));
+            }
+
+            if ($request->has('schedule_id')) {
+                $query->where('technician_scheduled_id', $request->input('schedule_id'));
+            }
+
+            if ($request->has('order_id')) {
+                $query->whereHas('technicianSchedule', function ($q) use ($request) {
+                    $q->where('order_id', $request->input('order_id'));
+                });
+            }
+
+            if ($request->has('order_item_id')) {
+                $query->whereHas('technicianSchedule', function ($q) use ($request) {
+                    $q->where('order_item_id', $request->input('order_item_id'));
+                });
+            }
+
+            if ($request->has('order_installation_id')) {
+                $query->whereHas('technicianSchedule', function ($q) use ($request) {
+                    $q->where('order_installation_id', $request->input('order_installation_id'));
+                });
+            }
+
+            if ($request->has('technician_id')) {
+                $query->where('technician_id', $request->input('technician_id'));
+            }
+
+            if ($request->has('scheduled_date')) {
+                $query->whereDate('scheduled_date', $request->input('scheduled_date'));
+            }
+
+            $perPage = max(1, min((int) $request->input('per_page', 15), 100));
+            $paginated = $query->orderBy('created_at', 'desc')->paginate($perPage);
+
+            return response()->json([
+                'success' => true,
+                'status' => 'success',
+                'message' => 'Technician schedule history retrieved successfully.',
+                'pagination' => [
+                    'current_page' => $paginated->currentPage(),
+                    'per_page' => $paginated->perPage(),
+                    'total' => $paginated->total(),
+                    'last_page' => $paginated->lastPage(),
+                ],
+                'data' => $paginated->items(),
+            ], 200);
+
+        } catch (Throwable $e) {
+            return response()->json([
+                'success' => false,
+                'status' => 'error',
+                'message' => 'Error retrieving schedule history: ' . $e->getMessage(),
             ], 500);
         }
     }

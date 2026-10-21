@@ -430,6 +430,12 @@ class ResourceController extends Controller
             'custom_latitude' => 25.276987,
             'custom_longitude' => 51.520008,
             'custom_tags' => 'Standard',
+            'ready_assign' => false,
+            'ready_to_assign' => false,
+            'ready assign' => false,
+            'is_ready_to_assign' => false,
+            'all_items_vs' => false,
+            'vs_items_count' => 0,
             'line_items' => [
                 [
                     'id' => 901,

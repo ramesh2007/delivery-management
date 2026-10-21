@@ -37,8 +37,16 @@ Route::match(['get', 'post'], '/orders/status/installation', [OrderStatusApiCont
 Route::match(['get', 'post'], '/orders/installation', [OrderStatusApiController::class, 'installationOrders']);
 Route::match(['get', 'post'], '/orders/status/scheduled-items', [ScheduleController::class, 'scheduledItems']);
 Route::match(['get', 'post'], '/orders/scheduled-items', [ScheduleController::class, 'scheduledItems']);
+Route::match(['get', 'post'], '/installation-completed', [ScheduleController::class, 'installationCompleted']);
+Route::match(['get', 'post'], '/orders/status/installation-completed', [ScheduleController::class, 'installationCompleted']);
+Route::match(['get', 'post'], '/orders/installation-completed', [ScheduleController::class, 'installationCompleted']);
+Route::get('/orders', [OrderStatusApiController::class, 'all']);
+Route::get('/order-management/orders/{id}', [OrderManagementController::class, 'show']);
 Route::any('/check-technician-avaliablity', [ScheduleTechnicianController::class, 'checkTechnicianAvaliable']);
 Route::any('/check-technician-availability', [ScheduleTechnicianController::class, 'checkTechnicianAvaliable']);
+Route::match(['get', 'post'], '/technician-schedule/create', [ScheduleTechnicianController::class, 'createSchedule']);
+Route::match(['get', 'post'], '/technician-schedule/reschedule', [ScheduleTechnicianController::class, 'rescheduleSchedule']);
+Route::get('/technician-schedule/list', [ScheduleTechnicianController::class, 'listSchedules']);
 
 //Admin Routes
 Route::prefix('admin')->group(function(){
@@ -106,6 +114,9 @@ Route::prefix('admin')->group(function(){
     // Schedule Endpoints (Assignment & Item-wise Scheduled Listing)
     Route::post('/schedule/assign/{order_item_id?}', [ScheduleController::class, 'assignSchedule']);
     Route::match(['get', 'post'], '/orders/status/scheduled-items', [ScheduleController::class, 'scheduledItems']);
+    Route::match(['get', 'post'], '/technician-scheduled-list', [ScheduleController::class, 'technicianScheduledList']);
+    Route::any('/installation-completed', [ScheduleController::class, 'installationCompleted']);
+
     // Route::match(['get', 'post'], '/orders/status/scheduled', [ScheduleController::class, 'scheduledItems']);
     // Route::match(['get', 'post'], '/orders/status/scheduled-assigned', [ScheduleController::class, 'scheduledItems']);
     // Route::match(['get', 'post'], '/orders/scheduled-items', [ScheduleController::class, 'scheduledItems']);
@@ -122,7 +133,9 @@ Route::prefix('admin')->group(function(){
     Route::get('/installation/teams/{LocationId?}', [InstallationLevelController::class, 'team']);
     Route::any('/check-technician-avaliablity', [ScheduleTechnicianController::class, 'checkTechnicianAvaliable']);
     Route::match(['get', 'post'], '/technician-schedule/create', [ScheduleTechnicianController::class, 'createSchedule']);
-    Route::get('/technician-schedule/list', [ScheduleTechnicianController::class, 'listSchedules']);
+    Route::match(['get', 'post'], '/technician-schedule/reschedule', [ScheduleTechnicianController::class, 'rescheduleSchedule']);
+    Route::match(['get', 'post'], '/technician-schedule/list', [ScheduleController::class, 'technicianScheduledList']);
+    Route::get('/technician-schedule/history', [ScheduleTechnicianController::class, 'scheduleHistory']);
 
     // Flagged Orders Management Endpoints
 
@@ -158,8 +171,8 @@ Route::prefix('mobile')->group(function(){
 
     // Packer Workflow API Endpoints (Assignment, Barcode Verification, Bag Count & Order Lists)
     Route::get('/orders/packer/ready-to-pack', [PackerManagementController::class, 'getPickedOrdersForPacker']);
-    Route::get('/orders/packer/picked/{user_id?}', [PackerManagementController::class, 'getPickedOrdersForPacker']);
-    Route::get('/orders-picked/{id?}', [PackerManagementController::class, 'getPickedOrdersForPacker']);
+    // Route::get('/orders/packer/picked/{user_id?}', [PackerManagementController::class, 'getPickedOrdersForPacker']);
+    // Route::get('/orders-picked/{id?}', [PackerManagementController::class, 'getPickedOrdersForPacker']);
 
     Route::get('/orders/packer/packed/{user_id?}', [PackerManagementController::class, 'getPackedOrders']);
     Route::get('/orders-packed/{id?}', [PackerManagementController::class, 'getPackedOrders']);
@@ -197,6 +210,8 @@ Route::prefix('mobile')->group(function(){
     Route::post('/orders/driver/delivered', [DeliveryManagementController::class, 'orderDelivered']);
     Route::post('/orders/driver/mark-as-delivered', [DeliveryManagementController::class, 'markAsDelivered']);
     Route::post('/orders/driver/mark-delivered', [DeliveryManagementController::class, 'markAsDelivered']);
+    Route::post('/orders/driver/verify-vs-item', [DeliveryManagementController::class, 'verifyVsItem']);
+    Route::post('/orders/driver/verify-virtual-stock', [DeliveryManagementController::class, 'verifyVsItem']);
     Route::post('/orders/driver/cancelled', [DeliveryManagementController::class, 'orderCancelled']);
     Route::post('/orders/driver/refund', [DeliveryManagementController::class, 'orderRefund']);
     Route::post('/orders/driver/exchange', [DeliveryManagementController::class, 'orderExchange']);
@@ -230,7 +245,7 @@ Route::prefix('mobile')->group(function(){
     Route::match(['get', 'post'], 'scheduled/completed/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getCompletedInstallationsByInstallerUserId']);
     Route::match(['get', 'post'], 'scheduled/update-status/{id?}', [ScheduledInstallationMobileController::class, 'updateStatus']);
     Route::match(['get', 'post'], 'scheduled/installed-proof-upload', [ScheduledInstallationMobileController::class, 'InstalledProofimageupload']);
-
+    Route::match(['get', 'post'], 'scheduled/installed-proof-upload', [ScheduledInstallationMobileController::class, 'InstalledProofimageupload']);
     //Mobile Dashboard Endpoints
     Route::match(['get', 'post'], '/picker/dashboard/{picker_id?}', [DashboardController::class, 'pickerDashboard']);
     Route::match(['get', 'post'], '/packer/dashboard/{packer_id?}', [DashboardController::class, 'packerDashboard']);
@@ -297,6 +312,7 @@ Route::get('/shopify/status', [ShopifyController::class, 'apiStatus']);
 Route::get('/shopify/products', [ShopifyController::class, 'apiProducts']);
 Route::get('/shopify/orders', [ShopifyController::class, 'apiOrders']);
 Route::get('/shopify/orders/{id}', [ShopifyController::class, 'apiOrder']);
+Route::post('/shopify/orders/{id}/sync-fulfillment', [ShopifyController::class, 'apiSyncFulfillment']);
 Route::post('/shopify/webhooks/orders-create', [ShopifyController::class, 'handleOrderWebhook']);
 Route::post('/shopify/webhooks/orders-update', [ShopifyController::class, 'handleOrderWebhook']);
 Route::post('/shopify/webhooks/orders-paid', [ShopifyController::class, 'handleOrderWebhook']);

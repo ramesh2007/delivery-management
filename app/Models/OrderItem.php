@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasManyThrough;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class OrderItem extends Model
@@ -30,6 +31,10 @@ class OrderItem extends Model
         'packer_verified_by',
         'packer_verified_user_name',
         'packer_verified_at',
+        'is_vs_verified',
+        'vs_verified_by',
+        'vs_verified_user_name',
+        'vs_verified_at',
         'assigned_to',
         'assigned_user_name',
         'assigned_at',
@@ -42,6 +47,9 @@ class OrderItem extends Model
         'delivered_by',
         'delivered_user_name',
         'delivered_at',
+        'product_tags',
+        'gift_wrap',
+        'gift_message',
     ];
 
     protected $casts = [
@@ -49,11 +57,27 @@ class OrderItem extends Model
         'is_flagged' => 'boolean',
         'is_packer_verified' => 'boolean',
         'packer_verified_at' => 'datetime',
+        'is_vs_verified' => 'boolean',
+        'vs_verified_at' => 'datetime',
         'assigned_at' => 'datetime',
         'picked_at' => 'datetime',
         'packed_at' => 'datetime',
         'delivered_at' => 'datetime',
     ];
+
+    protected static function booted(): void
+    {
+        static::saved(function (OrderItem $item) {
+            if ($item->order_id) {
+                \Illuminate\Support\Facades\Cache::forget("order_details_endpoint_" . md5(trim((string)$item->order_id)));
+                if ($item->relationLoaded('order') && $item->order && $item->order->order_number) {
+                    \Illuminate\Support\Facades\Cache::forget("order_details_endpoint_" . md5(trim((string)$item->order->order_number)));
+                    \Illuminate\Support\Facades\Cache::forget("order_details_endpoint_" . md5(ltrim((string)$item->order->order_number, '#')));
+                }
+                \Illuminate\Support\Facades\Cache::forget("admin_orders_new_p1_l15_s" . md5(''));
+            }
+        });
+    }
 
     /**
      * Ensure is_installable always resolves to a boolean
@@ -136,6 +160,14 @@ class OrderItem extends Model
     }
 
     /**
+     * Get the driver who verified this Virtual Stock item.
+     */
+    public function vsVerifiedUser(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'vs_verified_by');
+    }
+
+    /**
      * Get the installation associated with this order item.
      */
     public function installation(): HasOne
@@ -169,5 +201,20 @@ class OrderItem extends Model
     public function technicianSchedules(): HasMany
     {
         return $this->hasMany(TechnicianScheduled::class, 'order_item_id');
+    }
+
+    /**
+     * Get all historical technician schedule logs for this order item.
+     */
+    public function scheduleHistories(): HasManyThrough
+    {
+        return $this->hasManyThrough(TechnicianScheduleHistory::class, TechnicianScheduled::class, 'order_item_id', 'technician_scheduled_id');
+    }
+    /**
+     * Get all installation proof images for this item.
+     */
+    public function installationImages(): HasMany
+    {
+        return $this->hasMany(InstallationImage::class, 'order_item_id');
     }
 }

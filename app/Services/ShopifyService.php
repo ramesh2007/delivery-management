@@ -11,6 +11,7 @@ use App\Models\OrderInstallation;
 use App\Models\ShopifySyncLog;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Cache;
 
 class ShopifyService
 {
@@ -292,6 +293,29 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
     }
 }
     /**
+     * Send GET request to Shopify API with automatic 429 rate limit backoff and retry
+     */
+    public function executeShopifyGetWithRetry(string $url, string $token, array $params = [], int $retries = 3, int $timeout = 10): \Illuminate\Http\Client\Response
+    {
+        for ($i = 0; $i < $retries; $i++) {
+            $response = Http::timeout($timeout)->withHeaders([
+                'X-Shopify-Access-Token' => $token,
+                'Content-Type' => 'application/json',
+            ])->get($url, $params);
+
+            if ($response->status() === 429 && $i < $retries - 1) {
+                $retryAfter = (float) ($response->header('Retry-After') ?? 2.0);
+                usleep((int) (max(1.0, $retryAfter) * 1000000));
+                continue;
+            }
+
+            return $response;
+        }
+
+        return $response;
+    }
+
+    /**
      * Fetch single product details from Shopify API by Product ID
      */
     public function getProduct(string $productId, ?string $shop = null, ?string $accessToken = null): array
@@ -303,13 +327,11 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
 
         $shopDomain = $store['shop'];
         $token = $store['access_token'];
-        $url = "https://{$shopDomain}/admin/api/{$this->apiVersion}/products/{$productId}.json";
+        $cleanProductId = ltrim((string) $productId, '#');
+        $url = "https://{$shopDomain}/admin/api/{$this->apiVersion}/products/{$cleanProductId}.json";
 
         try {
-            $response = Http::timeout(5)->withHeaders([
-                'X-Shopify-Access-Token' => $token,
-                'Content-Type' => 'application/json',
-            ])->get($url);
+            $response = $this->executeShopifyGetWithRetry($url, $token, [], 3, 10);
 
             if ($response->successful()) {
                 $product = $response->json('product', []);
@@ -349,13 +371,11 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
 
         $shopDomain = $store['shop'];
         $token = $store['access_token'];
-        $url = "https://{$shopDomain}/admin/api/{$this->apiVersion}/products/{$productId}/metafields.json";
+        $cleanProductId = ltrim((string) $productId, '#');
+        $url = "https://{$shopDomain}/admin/api/{$this->apiVersion}/products/{$cleanProductId}/metafields.json";
 
         try {
-            $response = Http::timeout(5)->withHeaders([
-                'X-Shopify-Access-Token' => $token,
-                'Content-Type' => 'application/json',
-            ])->get($url);
+            $response = $this->executeShopifyGetWithRetry($url, $token, [], 3, 10);
 
             if ($response->successful()) {
                 return $response->json('metafields', []);
@@ -383,10 +403,7 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
         $url = "https://{$shopDomain}/admin/api/{$this->apiVersion}/variants/{$cleanVariantId}/metafields.json";
 
         try {
-            $response = Http::timeout(5)->withHeaders([
-                'X-Shopify-Access-Token' => $token,
-                'Content-Type' => 'application/json',
-            ])->get($url);
+            $response = $this->executeShopifyGetWithRetry($url, $token, [], 3, 10);
 
             if ($response->successful()) {
                 return $response->json('metafields', []);
@@ -497,6 +514,7 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
 
         $productMetafieldsMap = [];
         $variantMetafieldsMap = [];
+        $productTagsMap = [];
 
         foreach ($orders as &$order) {
             if (empty($order['line_items']) || !is_array($order['line_items'])) {
@@ -507,6 +525,40 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
                 $productIdStr = !empty($item['product_id']) ? (string) $item['product_id'] : null;
                 $variantIdStr = !empty($item['variant_id']) ? (string) $item['variant_id'] : null;
 
+                // 1. Resolve product tags
+                $itemTags = $item['product_tags'] ?? ($item['tags'] ?? ($item['product']['tags'] ?? null));
+                if (empty($itemTags) && !empty($productIdStr)) {
+                    if (array_key_exists($productIdStr, $productTagsMap)) {
+                        $itemTags = $productTagsMap[$productIdStr];
+                    } else {
+                        $localTags = null;
+                        try {
+                            $localTags = OrderItem::where('product_id', $productIdStr)
+                                ->whereNotNull('product_tags')
+                                ->where('product_tags', '!=', '')
+                                ->value('product_tags');
+                        } catch (\Throwable $e) {}
+
+                        if (!empty($localTags)) {
+                            $itemTags = $localTags;
+                        } else {
+                            try {
+                                $productRes = Cache::remember("shopify_prod_tags_{$productIdStr}", now()->addHours(6), function () use ($productIdStr, $shop, $accessToken) {
+                                    return $this->getProduct($productIdStr, $shop, $accessToken);
+                                });
+                                if (!empty($productRes['success']) && !empty($productRes['product']['tags'])) {
+                                    $itemTags = $productRes['product']['tags'];
+                                }
+                            } catch (\Throwable $e) {}
+                        }
+                        $productTagsMap[$productIdStr] = $itemTags;
+                    }
+                }
+
+                if (is_array($itemTags)) {
+                    $itemTags = implode(', ', array_filter($itemTags));
+                }
+
                 $itemMetafields = $item['metafields'] ?? ($item['product']['metafields'] ?? null);
 
                 // Fetch product metafields from Shopify API if not present in item
@@ -514,7 +566,9 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
                     if (array_key_exists($productIdStr, $productMetafieldsMap)) {
                         $itemMetafields = $productMetafieldsMap[$productIdStr];
                     } else {
-                        $itemMetafields = $this->getProductMetafields($productIdStr, $shop, $accessToken);
+                        $itemMetafields = Cache::remember("shopify_prod_mf_{$productIdStr}", now()->addHours(6), function () use ($productIdStr, $shop, $accessToken) {
+                            return $this->getProductMetafields($productIdStr, $shop, $accessToken);
+                        });
                         $productMetafieldsMap[$productIdStr] = $itemMetafields;
                     }
                 }
@@ -526,7 +580,9 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
                     if (array_key_exists($variantIdStr, $variantMetafieldsMap)) {
                         $variantMf = $variantMetafieldsMap[$variantIdStr];
                     } else {
-                        $variantMf = $this->getVariantMetafields($variantIdStr, $shop, $accessToken);
+                        $variantMf = Cache::remember("shopify_var_mf_{$variantIdStr}", now()->addHours(6), function () use ($variantIdStr, $shop, $accessToken) {
+                            return $this->getVariantMetafields($variantIdStr, $shop, $accessToken);
+                        });
                         $variantMetafieldsMap[$variantIdStr] = $variantMf;
                     }
 
@@ -556,8 +612,10 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
                     } catch (\Throwable $e) {}
                 }
 
-                // Attach metafields and resolved installation details directly to the line item
+                // Attach metafields, tags, and resolved installation details directly to the line item
                 $item['metafields'] = is_array($itemMetafields) ? $itemMetafields : [];
+                $item['tags'] = $itemTags;
+                $item['product_tags'] = $itemTags;
                 $item['installation_type'] = $parsed['installation_type'];
                 $item['installation_level'] = $parsed['installation_level'];
                 $item['is_installable'] = $parsed['is_installable'];
@@ -626,13 +684,10 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
         $url = "https://{$shopDomain}/admin/api/{$this->apiVersion}/orders.json";
 
         try {
-            $response = Http::timeout(10)->withHeaders([
-                'X-Shopify-Access-Token' => $token,
-                'Content-Type' => 'application/json',
-            ])->get($url, array_merge([
+            $response = $this->executeShopifyGetWithRetry($url, $token, array_merge([
                 'status' => 'any',
                 'limit' => 50,
-            ], $params));
+            ], $params), 3, 10);
 
             if ($response->successful()) {
                 $orders = $response->json('orders', []);
@@ -692,10 +747,7 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
         $url = "https://{$shopDomain}/admin/api/{$this->apiVersion}/orders/{$cleanId}.json";
 
         try {
-            $response = Http::timeout(10)->withHeaders([
-                'X-Shopify-Access-Token' => $token,
-                'Content-Type' => 'application/json',
-            ])->get($url);
+            $response = $this->executeShopifyGetWithRetry($url, $token, [], 3, 10);
 
             if ($response->successful()) {
                 $order = $response->json('order', []);
@@ -734,10 +786,36 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
     /**
      * Sync orders from Shopify API into database tables (`orders` and `order_items`) with default 'pending' status
      */
-    public function syncOrdersToDatabase(?string $shop = null, ?string $accessToken = null): array
+    public function syncOrdersToDatabase(?string $shop = null, ?string $accessToken = null, array $params = []): array
     {
         $startTime = microtime(true);
-        $ordersResult = $this->getOrders($shop, $accessToken);
+
+        // High-performance incremental sync for 500-700 orders/day:
+        // Automatically fetch orders updated since the last known update, preventing full table sweeps
+        if (empty($params['updated_at_min']) && empty($params['all'])) {
+            try {
+                $latestUpdated = null;
+                if (\Illuminate\Support\Facades\Schema::hasTable('order_payments')) {
+                    $latestUpdated = OrderPayment::max('shopify_updated_at');
+                }
+                if (!$latestUpdated) {
+                    $latestUpdated = Order::max('updated_at');
+                }
+                if ($latestUpdated) {
+                    // 10-minute safety buffer to handle clock drift or concurrent updates
+                    $params['updated_at_min'] = \Carbon\Carbon::parse($latestUpdated)->subMinutes(10)->toIso8601String();
+                }
+            } catch (\Throwable $e) {}
+        }
+
+        $limit = $params['limit'] ?? 50;
+        $queryParams = array_merge([
+            'status' => 'any',
+            'limit' => $limit,
+        ], $params);
+        unset($queryParams['all']);
+
+        $ordersResult = $this->getOrders($shop, $accessToken, $queryParams);
         if (!$ordersResult['success']) {
             $errorMsg = $ordersResult['error'] ?? 'Unknown error';
             Log::warning("Shopify syncOrdersToDatabase: getOrders failed: " . (is_string($errorMsg) ? $errorMsg : json_encode($errorMsg)));
@@ -826,7 +904,7 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
             $primaryOrderNumber = 'ORD-' . time();
         }
 
-        // Gather all candidate identifiers to find existing order without creating duplicates
+        // Gather candidate identifiers to find existing order without creating duplicates
         $candidateNumbers = array_values(array_unique(array_filter([
             $primaryOrderNumber,
             $rawName,
@@ -841,42 +919,14 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
             $rawId ? 'SO-' . $rawId : null,
         ])));
 
-        $customerName = null;
-        if (!empty($shopifyOrder['customer'])) {
-            $customerName = trim(($shopifyOrder['customer']['first_name'] ?? '') . ' ' . ($shopifyOrder['customer']['last_name'] ?? ''));
-        }
-        if (!$customerName && !empty($shopifyOrder['shipping_address']['name'])) {
-            $customerName = trim($shopifyOrder['shipping_address']['name']);
-        }
-        if (!$customerName && !empty($shopifyOrder['billing_address']['name'])) {
-            $customerName = trim($shopifyOrder['billing_address']['name']);
-        }
-
-        $customerPhone = $shopifyOrder['phone'] 
-            ?? ($shopifyOrder['customer']['phone'] ?? ($shopifyOrder['shipping_address']['phone'] ?? ($shopifyOrder['billing_address']['phone'] ?? null)));
-
-        $shippingAddress = null;
-        if (!empty($shopifyOrder['shipping_address'])) {
-            $addr = $shopifyOrder['shipping_address'];
-            $shippingAddress = implode(', ', array_filter([
-                $addr['address1'] ?? null,
-                $addr['address2'] ?? null,
-                $addr['city'] ?? null,
-                $addr['province'] ?? null,
-                $addr['zip'] ?? null,
-                $addr['country'] ?? null,
-            ]));
-        }
-
-        // Query existing orders matching any candidate order identifier
         $existingOrders = Order::whereIn('order_number', $candidateNumbers)->get();
 
         // Also check if order is linked via order_payments.shopify_order_id
-        if (!empty($rawId)) {
+        if (!empty($rawId) && $existingOrders->isEmpty()) {
             try {
                 if (\Illuminate\Support\Facades\Schema::hasTable('order_payments')) {
                     $linkedOrderId = OrderPayment::where('shopify_order_id', $rawId)->value('order_id');
-                    if ($linkedOrderId && !$existingOrders->contains('id', $linkedOrderId)) {
+                    if ($linkedOrderId) {
                         $linkedOrder = Order::find($linkedOrderId);
                         if ($linkedOrder) {
                             $existingOrders->push($linkedOrder);
@@ -907,23 +957,89 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
             $order = $existingOrders->first();
         }
 
+        $customerName = null;
+        if (!empty($shopifyOrder['customer'])) {
+            $customerName = trim(($shopifyOrder['customer']['first_name'] ?? '') . ' ' . ($shopifyOrder['customer']['last_name'] ?? ''));
+        }
+        if (!$customerName && !empty($shopifyOrder['shipping_address']['name'])) {
+            $customerName = trim($shopifyOrder['shipping_address']['name']);
+        }
+        if (!$customerName && !empty($shopifyOrder['billing_address']['name'])) {
+            $customerName = trim($shopifyOrder['billing_address']['name']);
+        }
+
+        $customerPhone = $shopifyOrder['phone'] 
+            ?? ($shopifyOrder['customer']['phone'] ?? ($shopifyOrder['shipping_address']['phone'] ?? ($shopifyOrder['billing_address']['phone'] ?? null)));
+
+        $shippingAddress = null;
+        if (!empty($shopifyOrder['shipping_address'])) {
+            $addr = $shopifyOrder['shipping_address'];
+            $shippingAddress = implode(', ', array_filter([
+                $addr['address1'] ?? null,
+                $addr['address2'] ?? null,
+                $addr['city'] ?? null,
+                $addr['province'] ?? null,
+                $addr['zip'] ?? null,
+                $addr['country'] ?? null,
+            ]));
+        }
+
+        $orderNote = !empty($shopifyOrder['note']) ? trim((string)$shopifyOrder['note']) : (!empty($shopifyOrder['notes']) ? trim((string)$shopifyOrder['notes']) : null);
+        $shopifyCreatedAt = !empty($shopifyOrder['created_at']) ? \Carbon\Carbon::parse($shopifyOrder['created_at']) : null;
+        $shopifyUpdatedAt = !empty($shopifyOrder['updated_at']) ? \Carbon\Carbon::parse($shopifyOrder['updated_at']) : null;
+
+        // Lean Shopify status parsing: only shopify_status and cancelled_at on orders table
+        $rawFinancialStatus = !empty($shopifyOrder['financial_status']) ? strtolower((string)$shopifyOrder['financial_status']) : 'pending';
+        $cancelledAt = !empty($shopifyOrder['cancelled_at']) ? \Carbon\Carbon::parse($shopifyOrder['cancelled_at']) : null;
+        $cancelReason = !empty($shopifyOrder['cancel_reason']) ? (string)$shopifyOrder['cancel_reason'] : null;
+
+        // Check cancellation
+        $isCancelled = ($cancelledAt !== null)
+            || !empty($cancelReason)
+            || ($rawFinancialStatus === 'refunded' && $cancelledAt !== null);
+
+        // Determine Shopify order status (cancelled, closed, or open)
+        $shopifyStatus = (!empty($shopifyOrder['cancelled_at']) || !empty($cancelReason))
+            ? 'cancelled'
+            : (!empty($shopifyOrder['closed_at']) ? 'closed' : 'open');
+
+        if ($shopifyStatus === 'cancelled') {
+            $isCancelled = true;
+        }
+
         if (!$order) {
-            $order = Order::create([
+            $initialStatus = $isCancelled ? 'cancelled' : 'pending';
+
+            $orderAttributes = [
                 'order_number' => $primaryOrderNumber,
                 'customer_name' => $customerName,
                 'customer_phone' => $customerPhone,
                 'delivery_address' => $shippingAddress,
                 'total_amount' => $shopifyOrder['total_price'] ?? 0.00,
-                'status' => 'pending',
-            ]);
+                'status' => $initialStatus,
+                'shopify_status' => $shopifyStatus,
+                'cancelled_at' => $cancelledAt,
+            ];
+            if ($shopifyCreatedAt) {
+                $orderAttributes['created_at'] = $shopifyCreatedAt;
+            }
+            if ($shopifyUpdatedAt) {
+                $orderAttributes['updated_at'] = $shopifyUpdatedAt;
+            }
+            if ($orderNote !== null) {
+                $orderAttributes['notes'] = $orderNote;
+            }
+            $order = Order::create($orderAttributes);
 
             try {
                 if (\Illuminate\Support\Facades\Schema::hasTable('order_status_logs')) {
                     OrderStatusLog::create([
                         'order_id' => $order->id,
-                        'action' => 'shopify_synced',
-                        'new_status' => 'pending',
-                        'notes' => "Synced from Shopify Webhook/Payload as New Order (Order Number: {$primaryOrderNumber})",
+                        'action' => $isCancelled ? 'shopify_order_cancelled' : 'shopify_synced',
+                        'new_status' => $initialStatus,
+                        'notes' => $isCancelled
+                            ? "Synced from Shopify as Cancelled Order (Reason: {$cancelReason})"
+                            : "Synced from Shopify as New Order (Order Number: {$primaryOrderNumber})",
                     ]);
                 }
             } catch (\Throwable $e) {
@@ -935,11 +1051,54 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
                 'customer_phone' => $customerPhone ?: $order->customer_phone,
                 'delivery_address' => $shippingAddress ?: $order->delivery_address,
                 'total_amount' => $shopifyOrder['total_price'] ?? $order->total_amount,
+                'shopify_status' => $shopifyStatus,
             ];
+            if ($shopifyCreatedAt) {
+                $updateFields['created_at'] = $shopifyCreatedAt;
+            }
+            if ($shopifyUpdatedAt) {
+                $updateFields['updated_at'] = $shopifyUpdatedAt;
+            }
+            if ($orderNote !== null) {
+                $updateFields['notes'] = $orderNote;
+            }
             // If order was previously saved with internal rawId as order_number, upgrade it to human-readable format
             if ($order->order_number === $rawId && !empty($rawName) && $rawName !== $rawId) {
                 $updateFields['order_number'] = $primaryOrderNumber;
             }
+
+            // Real-time cancellation update from Shopify
+            if ($isCancelled) {
+                $updateFields['shopify_status'] = 'cancelled';
+                $updateFields['cancelled_at'] = $cancelledAt ?: now();
+
+                if ($order->status !== 'cancelled') {
+                    $oldStatus = $order->status;
+                    $updateFields['status'] = 'cancelled';
+
+                    // Cancel line items so workers know not to pick/pack them
+                    try {
+                        OrderItem::where('order_id', $order->id)
+                            ->where('status', '!=', 'cancelled')
+                            ->update(['status' => 'cancelled']);
+                    } catch (\Throwable $e) {}
+
+                    try {
+                        if (\Illuminate\Support\Facades\Schema::hasTable('order_status_logs')) {
+                            OrderStatusLog::create([
+                                'order_id' => $order->id,
+                                'action' => 'shopify_order_cancelled',
+                                'old_status' => $oldStatus,
+                                'new_status' => 'cancelled',
+                                'notes' => "Order cancelled on Shopify at " . ($cancelledAt ? $cancelledAt->toDateTimeString() : now()->toDateTimeString()),
+                            ]);
+                        }
+                    } catch (\Throwable $e) {
+                        Log::warning("Could not create OrderStatusLog for order {$order->id}: " . $e->getMessage());
+                    }
+                }
+            }
+
             $order->update($updateFields);
         }
 
@@ -1061,7 +1220,9 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
                             $itemMetafields = $productMetafieldsMap[$productIdStr];
                         } else {
                             try {
-                                $itemMetafields = $this->getProductMetafields($productIdStr, $shop, $accessToken);
+                                $itemMetafields = Cache::remember("shopify_prod_mf_{$productIdStr}", now()->addHours(6), function () use ($productIdStr, $shop, $accessToken) {
+                                    return $this->getProductMetafields($productIdStr, $shop, $accessToken);
+                                });
                             } catch (\Throwable $e) {
                                 $itemMetafields = [];
                             }
@@ -1073,8 +1234,11 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
 
                     // If not found in product metafields, check variant metafields
                     if (!$parsed['has_installation_metafield'] && !empty($item['variant_id'])) {
+                        $variantIdStr = (string) $item['variant_id'];
                         try {
-                            $variantMf = $this->getVariantMetafields((string) $item['variant_id'], $shop, $accessToken);
+                            $variantMf = Cache::remember("shopify_var_mf_{$variantIdStr}", now()->addHours(6), function () use ($variantIdStr, $shop, $accessToken) {
+                                return $this->getVariantMetafields($variantIdStr, $shop, $accessToken);
+                            });
                         } catch (\Throwable $e) {
                             $variantMf = [];
                         }
@@ -1137,6 +1301,60 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
                     }
                 }
 
+                static $hasProductTagsCol = null;
+                if ($hasProductTagsCol === null) {
+                    try {
+                        $hasProductTagsCol = \Illuminate\Support\Facades\Schema::hasColumn('order_items', 'product_tags');
+                    } catch (\Throwable $e) {
+                        $hasProductTagsCol = false;
+                    }
+                }
+
+                $itemTagsVal = $item['product_tags'] ?? ($item['tags'] ?? ($item['product']['tags'] ?? null));
+                if (is_array($itemTagsVal)) {
+                    $itemTagsVal = implode(', ', array_filter($itemTagsVal));
+                }
+
+                static $hasGiftWrapCol = null;
+                if ($hasGiftWrapCol === null) {
+                    try {
+                        $hasGiftWrapCol = \Illuminate\Support\Facades\Schema::hasColumn('order_items', 'gift_wrap');
+                    } catch (\Throwable $e) {
+                        $hasGiftWrapCol = false;
+                    }
+                }
+
+                static $hasGiftMessageCol = null;
+                if ($hasGiftMessageCol === null) {
+                    try {
+                        $hasGiftMessageCol = \Illuminate\Support\Facades\Schema::hasColumn('order_items', 'gift_message');
+                    } catch (\Throwable $e) {
+                        $hasGiftMessageCol = false;
+                    }
+                }
+
+                $giftWrap = null;
+                $giftMessage = null;
+                if (!empty($item['properties']) && is_array($item['properties'])) {
+                    foreach ($item['properties'] as $prop) {
+                        if (!is_array($prop)) continue;
+                        $pName = trim((string)($prop['name'] ?? ''));
+                        $lowerName = strtolower($pName);
+                        if (in_array($lowerName, ['giftwrap', 'gift wrap', 'gift_wrap', 'gift-wrap'], true)) {
+                            $val = trim((string)($prop['value'] ?? ''));
+                            if ($val !== '') {
+                                $giftWrap = $val;
+                            }
+                        }
+                        if (in_array($lowerName, ['gift message', 'gift_message', 'giftmessage', 'gift-message'], true)) {
+                            $val = trim((string)($prop['value'] ?? ''));
+                            if ($val !== '') {
+                                $giftMessage = $val;
+                            }
+                        }
+                    }
+                }
+
                 $itemAttributes = [
                     'order_id' => $order->id,
                     'line_item_id' => $lineItemId,
@@ -1147,10 +1365,19 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
                     'image' => $itemImage,
                     'quantity' => $item['quantity'] ?? 1,
                     'unit_price' => $item['price'] ?? 0.00,
-                    'status' => 'pending',
+                    'status' => $isCancelled ? 'cancelled' : 'pending',
                 ];
                 if ($hasIsInstallableCol) {
                     $itemAttributes['is_installable'] = $isInstallable;
+                }
+                if ($hasProductTagsCol && !empty($itemTagsVal)) {
+                    $itemAttributes['product_tags'] = $itemTagsVal;
+                }
+                if ($hasGiftWrapCol && $giftWrap !== null) {
+                    $itemAttributes['gift_wrap'] = $giftWrap;
+                }
+                if ($hasGiftMessageCol && $giftMessage !== null) {
+                    $itemAttributes['gift_message'] = $giftMessage;
                 }
 
                 if (!$orderItem) {
@@ -1165,8 +1392,20 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
                         'quantity' => $item['quantity'] ?? $orderItem->quantity,
                         'unit_price' => $item['price'] ?? $orderItem->unit_price,
                     ];
+                    if ($isCancelled) {
+                        $updateData['status'] = 'cancelled';
+                    }
                     if ($hasIsInstallableCol && ($hasInstallationMetafield || $isInstallable)) {
                         $updateData['is_installable'] = $isInstallable;
+                    }
+                    if ($hasProductTagsCol && !empty($itemTagsVal)) {
+                        $updateData['product_tags'] = $itemTagsVal;
+                    }
+                    if ($hasGiftWrapCol && $giftWrap !== null) {
+                        $updateData['gift_wrap'] = $giftWrap;
+                    }
+                    if ($hasGiftMessageCol && $giftMessage !== null) {
+                        $updateData['gift_message'] = $giftMessage;
                     }
                     $orderItem->update($updateData);
                 }
@@ -1187,6 +1426,24 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
                         );
                     } catch (\Throwable $e) {
                         Log::warning("Could not store OrderInstallation for item {$orderItem->id}: " . $e->getMessage());
+                    }
+                }
+            }
+        }
+
+        // Handle partially refunded/cancelled items from refunds payload
+        if (!empty($shopifyOrder['refunds']) && is_array($shopifyOrder['refunds'])) {
+            foreach ($shopifyOrder['refunds'] as $refund) {
+                if (!empty($refund['refund_line_items']) && is_array($refund['refund_line_items'])) {
+                    foreach ($refund['refund_line_items'] as $rli) {
+                        $rLineItemId = !empty($rli['line_item_id']) ? (string)$rli['line_item_id'] : null;
+                        if ($rLineItemId) {
+                            try {
+                                OrderItem::where('order_id', $order->id)
+                                    ->where('line_item_id', $rLineItemId)
+                                    ->update(['status' => 'cancelled']);
+                            } catch (\Throwable $e) {}
+                        }
                     }
                 }
             }
@@ -1491,5 +1748,692 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
             'webhooks' => $results,
         ];
     }
+
+    /**
+     * Get fulfillment orders for a given Shopify order
+     * GET /admin/api/{version}/orders/{order_id}/fulfillment_orders.json
+     */
+    public function getFulfillmentOrders(string|int $shopifyOrderId, ?string $shop = null, ?string $accessToken = null): array
+    {
+        $store = $this->resolveCredentials($shop, $accessToken);
+        if (!$store['success']) {
+            return $store;
+        }
+
+        $shopDomain = $store['shop'];
+        $token = $store['access_token'];
+        $url = "https://{$shopDomain}/admin/api/{$this->apiVersion}/orders/{$shopifyOrderId}/fulfillment_orders.json";
+
+        try {
+            $response = Http::withHeaders([
+                'X-Shopify-Access-Token' => $token,
+                'Accept' => 'application/json',
+            ])->get($url);
+
+            if ($response->successful()) {
+                return [
+                    'success' => true,
+                    'fulfillment_orders' => $response->json('fulfillment_orders', []),
+                    'status_code' => $response->status(),
+                ];
+            }
+
+            return [
+                'success' => false,
+                'status_code' => $response->status(),
+                'error' => $response->json('errors') ?? $response->body(),
+                'raw' => $response->json(),
+            ];
+        } catch (\Throwable $e) {
+            return [
+                'success' => false,
+                'status_code' => 500,
+                'error' => $e->getMessage(),
+            ];
+        }
+    }
+
+    /**
+     * Create fulfillment in Shopify via FulfillmentOrders API
+     * POST /admin/api/{version}/fulfillments.json
+     */
+    public function createFulfillment(array $payload, ?string $shop = null, ?string $accessToken = null): array
+    {
+        $store = $this->resolveCredentials($shop, $accessToken);
+        if (!$store['success']) {
+            return $store;
+        }
+
+        $shopDomain = $store['shop'];
+        $token = $store['access_token'];
+        $url = "https://{$shopDomain}/admin/api/{$this->apiVersion}/fulfillments.json";
+
+        try {
+            $response = Http::withHeaders([
+                'X-Shopify-Access-Token' => $token,
+                'Content-Type' => 'application/json',
+                'Accept' => 'application/json',
+            ])->post($url, ['fulfillment' => $payload]);
+
+            if ($response->successful()) {
+                return [
+                    'success' => true,
+                    'fulfillment' => $response->json('fulfillment', []),
+                    'status_code' => $response->status(),
+                ];
+            }
+
+            return [
+                'success' => false,
+                'status_code' => $response->status(),
+                'error' => $response->json('errors') ?? $response->body(),
+                'raw' => $response->json(),
+            ];
+        } catch (\Throwable $e) {
+            return [
+                'success' => false,
+                'status_code' => 500,
+                'error' => $e->getMessage(),
+            ];
+        }
+    }
+
+    /**
+     * Record a fulfillment delivery event in Shopify (status: delivered, out_for_delivery, etc.)
+     * POST /admin/api/{version}/orders/{order_id}/fulfillments/{fulfillment_id}/events.json
+     */
+    public function createFulfillmentEvent(string|int $shopifyOrderId, string|int $fulfillmentId, string $status = 'delivered', array $eventData = [], ?string $shop = null, ?string $accessToken = null): array
+    {
+        $store = $this->resolveCredentials($shop, $accessToken);
+        if (!$store['success']) {
+            return $store;
+        }
+
+        $shopDomain = $store['shop'];
+        $token = $store['access_token'];
+        $url = "https://{$shopDomain}/admin/api/{$this->apiVersion}/orders/{$shopifyOrderId}/fulfillments/{$fulfillmentId}/events.json";
+
+        $payload = array_merge([
+            'status' => $status,
+            'happened_at' => now()->toIso8601String(),
+        ], $eventData);
+
+        try {
+            $response = Http::withHeaders([
+                'X-Shopify-Access-Token' => $token,
+                'Content-Type' => 'application/json',
+                'Accept' => 'application/json',
+            ])->post($url, ['event' => $payload]);
+
+            if ($response->successful()) {
+                return [
+                    'success' => true,
+                    'event' => $response->json('fulfillment_event', []),
+                    'status_code' => $response->status(),
+                ];
+            }
+
+            return [
+                'success' => false,
+                'status_code' => $response->status(),
+                'error' => $response->json('errors') ?? $response->body(),
+            ];
+        } catch (\Throwable $e) {
+            return [
+                'success' => false,
+                'status_code' => 500,
+                'error' => $e->getMessage(),
+            ];
+        }
+    }
+
+    /**
+     * Get fulfillments for a Shopify order
+     * GET /admin/api/{version}/orders/{order_id}/fulfillments.json
+     */
+    public function getOrderFulfillments(string|int $shopifyOrderId, ?string $shop = null, ?string $accessToken = null): array
+    {
+        $store = $this->resolveCredentials($shop, $accessToken);
+        if (!$store['success']) {
+            return $store;
+        }
+
+        $shopDomain = $store['shop'];
+        $token = $store['access_token'];
+        $url = "https://{$shopDomain}/admin/api/{$this->apiVersion}/orders/{$shopifyOrderId}/fulfillments.json";
+
+        try {
+            $response = Http::withHeaders([
+                'X-Shopify-Access-Token' => $token,
+                'Accept' => 'application/json',
+            ])->get($url);
+
+            if ($response->successful()) {
+                return [
+                    'success' => true,
+                    'fulfillments' => $response->json('fulfillments', []),
+                    'status_code' => $response->status(),
+                ];
+            }
+
+            return [
+                'success' => false,
+                'status_code' => $response->status(),
+                'error' => $response->json('errors') ?? $response->body(),
+            ];
+        } catch (\Throwable $e) {
+            return [
+                'success' => false,
+                'status_code' => 500,
+                'error' => $e->getMessage(),
+            ];
+        }
+    }
+
+    /**
+     * Close / Complete an order in Shopify
+     * POST /admin/api/{version}/orders/{order_id}/close.json
+     */
+    public function closeOrder(string|int $shopifyOrderId, ?string $shop = null, ?string $accessToken = null): array
+    {
+        $store = $this->resolveCredentials($shop, $accessToken);
+        if (!$store['success']) {
+            return $store;
+        }
+
+        $shopDomain = $store['shop'];
+        $token = $store['access_token'];
+        $url = "https://{$shopDomain}/admin/api/{$this->apiVersion}/orders/{$shopifyOrderId}/close.json";
+
+        try {
+            $response = Http::withHeaders([
+                'X-Shopify-Access-Token' => $token,
+                'Content-Type' => 'application/json',
+                'Accept' => 'application/json',
+            ])->post($url, []);
+
+            if ($response->successful()) {
+                return [
+                    'success' => true,
+                    'order' => $response->json('order', []),
+                    'status_code' => $response->status(),
+                ];
+            }
+
+            return [
+                'success' => false,
+                'status_code' => $response->status(),
+                'error' => $response->json('errors') ?? $response->body(),
+            ];
+        } catch (\Throwable $e) {
+            return [
+                'success' => false,
+                'status_code' => 500,
+                'error' => $e->getMessage(),
+            ];
+        }
+    }
+
+    /**
+     * Update order tags and note attributes in Shopify
+     * PUT /admin/api/{version}/orders/{order_id}.json
+     */
+    public function updateOrderTagsAndNote(string|int $shopifyOrderId, array $tagsToAdd = [], array $noteAttributes = [], ?string $shop = null, ?string $accessToken = null): array
+    {
+        $store = $this->resolveCredentials($shop, $accessToken);
+        if (!$store['success']) {
+            return $store;
+        }
+
+        $shopDomain = $store['shop'];
+        $token = $store['access_token'];
+
+        try {
+            $getUrl = "https://{$shopDomain}/admin/api/{$this->apiVersion}/orders/{$shopifyOrderId}.json?fields=id,tags,note_attributes";
+            $getResponse = Http::withHeaders([
+                'X-Shopify-Access-Token' => $token,
+                'Accept' => 'application/json',
+            ])->get($getUrl);
+
+            $currentOrder = $getResponse->successful() ? $getResponse->json('order', []) : [];
+            $existingTagsStr = $currentOrder['tags'] ?? '';
+            $existingTags = array_filter(array_map('trim', explode(',', (string)$existingTagsStr)));
+
+            $mergedTags = array_values(array_unique(array_merge($existingTags, $tagsToAdd)));
+            $mergedTagsStr = implode(', ', $mergedTags);
+
+            $existingAttributes = $currentOrder['note_attributes'] ?? [];
+            $attributesMap = [];
+            foreach ($existingAttributes as $attr) {
+                if (isset($attr['name'])) {
+                    $attributesMap[$attr['name']] = $attr['value'] ?? '';
+                }
+            }
+            foreach ($noteAttributes as $attr) {
+                if (isset($attr['name'])) {
+                    $attributesMap[$attr['name']] = $attr['value'] ?? '';
+                }
+            }
+            $mergedAttributes = [];
+            foreach ($attributesMap as $name => $value) {
+                $mergedAttributes[] = ['name' => $name, 'value' => (string)$value];
+            }
+
+            $putUrl = "https://{$shopDomain}/admin/api/{$this->apiVersion}/orders/{$shopifyOrderId}.json";
+            $putPayload = [
+                'order' => [
+                    'id' => (int)$shopifyOrderId,
+                    'tags' => $mergedTagsStr,
+                ],
+            ];
+            if (!empty($mergedAttributes)) {
+                $putPayload['order']['note_attributes'] = $mergedAttributes;
+            }
+
+            $putResponse = Http::withHeaders([
+                'X-Shopify-Access-Token' => $token,
+                'Content-Type' => 'application/json',
+                'Accept' => 'application/json',
+            ])->put($putUrl, $putPayload);
+
+            return [
+                'success' => $putResponse->successful(),
+                'status_code' => $putResponse->status(),
+                'tags' => $mergedTagsStr,
+                'order' => $putResponse->json('order', []),
+            ];
+        } catch (\Throwable $e) {
+            return [
+                'success' => false,
+                'status_code' => 500,
+                'error' => $e->getMessage(),
+            ];
+        }
+    }
+
+    /**
+     * Primary sync handler: When an order status is marked as 'delivered' or 'completed'
+     * (or partially delivered), sync to Shopify and update items as fulfilled and delivered,
+     * and close/complete the order in Shopify if completed.
+     *
+     * @param Order|int|string $order Order instance or ID/Number
+     * @param array $options Options (status, item_ids, delivered_by, delivered_at, action, notes, force)
+     * @return array
+     */
+    public function syncOrderFulfillmentToShopify(Order|int|string $order, array $options = []): array
+    {
+        $startTime = microtime(true);
+
+        // 1. Resolve Order Model
+        if (!($order instanceof Order)) {
+            $orderRecord = Order::with(['items', 'payment'])->find($order);
+            if (!$orderRecord) {
+                $cleanNum = ltrim((string)$order, '#');
+                $orderRecord = Order::with(['items', 'payment'])
+                    ->where('order_number', (string)$order)
+                    ->orWhere('order_number', $cleanNum)
+                    ->orWhere('order_number', '#' . $cleanNum)
+                    ->first();
+            }
+            $order = $orderRecord;
+        } else {
+            $order->loadMissing(['items', 'payment']);
+        }
+
+        if (!$order) {
+            return [
+                'success' => false,
+                'error' => 'Order record could not be found.',
+            ];
+        }
+
+        $targetStatus = strtolower(trim((string)($options['status'] ?? $order->status ?? 'delivered')));
+        $force = !empty($options['force']);
+
+        // Debounce lock to prevent redundant executions
+        $lockKey = "shopify_fulfillment_sync_{$order->id}_{$targetStatus}";
+        if (!$force && Cache::has($lockKey)) {
+            return [
+                'success' => true,
+                'message' => "Shopify fulfillment sync already in progress or recently executed for order #{$order->order_number}.",
+                'skipped' => true,
+            ];
+        }
+        Cache::put($lockKey, true, 8);
+
+        // 2. Resolve Shopify credentials
+        $store = $this->resolveCredentials($options['shop'] ?? null, $options['access_token'] ?? null);
+        if (!$store['success']) {
+            $this->recordSyncLog([
+                'event_type' => 'fulfillment_sync',
+                'topic' => 'orders/fulfill',
+                'order_number' => $order->order_number,
+                'local_order_id' => $order->id,
+                'status' => 'failed',
+                'error_message' => 'No active Shopify store credentials available.',
+                'duration_ms' => (int)((microtime(true) - $startTime) * 1000),
+            ]);
+
+            return [
+                'success' => false,
+                'error' => 'No active Shopify store credentials configured.',
+            ];
+        }
+
+        $shopDomain = $store['shop'];
+        $token = $store['access_token'];
+
+        // 3. Locate Shopify Order ID
+        $shopifyOrderId = $order->payment?->shopify_order_id;
+        if (empty($shopifyOrderId)) {
+            try {
+                $searchUrl = "https://{$shopDomain}/admin/api/{$this->apiVersion}/orders.json";
+                $searchRes = Http::withHeaders([
+                    'X-Shopify-Access-Token' => $token,
+                    'Accept' => 'application/json',
+                ])->get($searchUrl, [
+                    'name' => $order->order_number,
+                    'status' => 'any',
+                    'limit' => 5,
+                ]);
+
+                if ($searchRes->successful()) {
+                    $foundOrders = $searchRes->json('orders', []);
+                    if (!empty($foundOrders)) {
+                        $shopifyOrderId = (string)$foundOrders[0]['id'];
+                        // Save in OrderPayment for future lookups
+                        if (\Illuminate\Support\Facades\Schema::hasTable('order_payments')) {
+                            OrderPayment::updateOrCreate(
+                                ['order_id' => $order->id],
+                                ['shopify_order_id' => $shopifyOrderId]
+                            );
+                        }
+                    }
+                }
+            } catch (\Throwable $e) {
+                Log::warning("Could not search Shopify order ID for order {$order->id}: " . $e->getMessage());
+            }
+        }
+
+        if (empty($shopifyOrderId)) {
+            $msg = "Order #{$order->order_number} is not linked to any Shopify order ID.";
+            $this->recordSyncLog([
+                'event_type' => 'fulfillment_sync',
+                'topic' => 'orders/fulfill',
+                'shop_domain' => $shopDomain,
+                'order_number' => $order->order_number,
+                'local_order_id' => $order->id,
+                'status' => 'failed',
+                'error_message' => $msg,
+                'duration_ms' => (int)((microtime(true) - $startTime) * 1000),
+            ]);
+
+            return [
+                'success' => false,
+                'error' => $msg,
+            ];
+        }
+
+        $driverName = $options['delivered_by'] ?? ($order->delivered_user_name ?: 'Delivery Driver');
+        $deliveredAt = $order->delivered_at ? $order->delivered_at->toIso8601String() : now()->toIso8601String();
+        $isCompleted = ($targetStatus === 'completed' || $targetStatus === 'installed');
+        $isDelivered = ($targetStatus === 'delivered' || $targetStatus === 'partialy_deliverd' || $isCompleted);
+
+        // Filter items to fulfill
+        $order->loadMissing('items');
+        $allItems = $order->items->reject(fn($i) => $i->status === 'cancelled');
+
+        if (!empty($options['item_ids']) && is_array($options['item_ids'])) {
+            $itemsToFulfill = $order->items->whereIn('id', $options['item_ids']);
+        } elseif ($targetStatus === 'partialy_deliverd') {
+            $itemsToFulfill = $allItems->filter(fn($i) => in_array(strtolower((string)$i->status), ['delivered', 'completed', 'installed']));
+        } else {
+            $itemsToFulfill = $allItems;
+        }
+
+        $results = [
+            'order_id' => $order->id,
+            'order_number' => $order->order_number,
+            'shopify_order_id' => $shopifyOrderId,
+            'target_status' => $targetStatus,
+            'items_fulfilled_count' => 0,
+            'fulfillment_ids' => [],
+            'delivery_events_created' => 0,
+            'order_closed' => false,
+            'permission_warning' => null,
+        ];
+
+        // 4. Fetch Fulfillment Orders from Shopify
+        $foResult = $this->getFulfillmentOrders($shopifyOrderId, $shopDomain, $token);
+
+        // Handle scope permission limitation if Fulfillment Orders API returns 403
+        if (!$foResult['success'] && ($foResult['status_code'] ?? 0) === 403) {
+            $warningMsg = "Shopify app access token requires 'write_merchant_managed_fulfillment_orders' to create item-level fulfillments via API. Updating tags, delivery note, and order status.";
+            $results['permission_warning'] = $warningMsg;
+            Log::info("Shopify Fulfillment Sync [Permission Warning]: {$warningMsg} (Order #{$order->order_number})");
+
+            // Close order if completed
+            if ($isCompleted) {
+                $closeRes = $this->closeOrder($shopifyOrderId, $shopDomain, $token);
+                if (!empty($closeRes['success'])) {
+                    $results['order_closed'] = true;
+                    $order->shopify_status = 'closed';
+                    $order->save();
+                }
+            }
+
+            // Tag order as Delivered and/or Completed
+            $tags = ['Delivered'];
+            if ($isCompleted) {
+                $tags[] = 'Completed';
+            }
+            $this->updateOrderTagsAndNote($shopifyOrderId, $tags, [
+                ['name' => 'Delivery Status', 'value' => ucfirst($targetStatus)],
+                ['name' => 'Delivered By', 'value' => $driverName],
+                ['name' => 'Delivered At', 'value' => $deliveredAt],
+            ], $shopDomain, $token);
+
+            $durationMs = (int)((microtime(true) - $startTime) * 1000);
+            $this->recordSyncLog([
+                'event_type' => 'fulfillment_sync',
+                'topic' => 'orders/fulfill',
+                'shop_domain' => $shopDomain,
+                'shopify_order_id' => $shopifyOrderId,
+                'order_number' => $order->order_number,
+                'local_order_id' => $order->id,
+                'status' => 'success',
+                'error_message' => $warningMsg,
+                'items_count' => $itemsToFulfill->count(),
+                'duration_ms' => $durationMs,
+                'payload' => $results,
+            ]);
+
+            return [
+                'success' => true,
+                'message' => "Order #{$order->order_number} delivery status and tags synchronized to Shopify. (Note: approve 'write_merchant_managed_fulfillment_orders' in Shopify Admin to enable automatic line item fulfillment).",
+                'details' => $results,
+            ];
+        }
+
+        // 5. Process fulfillment orders
+        $createdFulfillmentIds = [];
+        if (!empty($foResult['success'])) {
+            $fulfillmentOrders = $foResult['fulfillment_orders'] ?? [];
+
+            foreach ($fulfillmentOrders as $fo) {
+                $foStatus = strtolower((string)($fo['status'] ?? ''));
+                if (!in_array($foStatus, ['open', 'in_progress'])) {
+                    continue;
+                }
+
+                $foId = $fo['id'];
+                $foLineItemsToFulfill = [];
+
+                foreach ($fo['line_items'] as $foLineItem) {
+                    $foLineItemId = $foLineItem['id'];
+                    $shopifyLineItemId = (string)($foLineItem['line_item_id'] ?? '');
+                    $fulfillableQty = (int)($foLineItem['fulfillable_quantity'] ?? $foLineItem['remaining_quantity'] ?? 0);
+
+                    if ($fulfillableQty <= 0) {
+                        continue;
+                    }
+
+                    // Match item in $itemsToFulfill
+                    $matched = $itemsToFulfill->first(function ($it) use ($shopifyLineItemId, $foLineItem) {
+                        if (!empty($it->line_item_id) && (string)$it->line_item_id === $shopifyLineItemId) {
+                            return true;
+                        }
+                        if (!empty($it->product_id) && !empty($foLineItem['product_id']) && (string)$it->product_id === (string)$foLineItem['product_id']) {
+                            return true;
+                        }
+                        if (!empty($it->barcode) && !empty($foLineItem['sku']) && (string)$it->barcode === (string)$foLineItem['sku']) {
+                            return true;
+                        }
+                        if (!empty($it->product_code) && !empty($foLineItem['sku']) && (string)$it->product_code === (string)$foLineItem['sku']) {
+                            return true;
+                        }
+                        return false;
+                    });
+
+                    // If full order is delivered/completed, or item matched:
+                    if ($matched || $targetStatus === 'delivered' || $targetStatus === 'completed') {
+                        $qty = min($fulfillableQty, (int)($matched->quantity ?? $fulfillableQty));
+                        $foLineItemsToFulfill[] = [
+                            'id' => $foLineItemId,
+                            'quantity' => $qty > 0 ? $qty : $fulfillableQty,
+                        ];
+                    }
+                }
+
+                if (!empty($foLineItemsToFulfill)) {
+                    $fulfillmentPayload = [
+                        'message' => "Items delivered by {$driverName}",
+                        'notify_customer' => false,
+                        'line_items_by_fulfillment_order' => [
+                            [
+                                'fulfillment_order_id' => $foId,
+                                'fulfillment_order_line_items' => $foLineItemsToFulfill,
+                            ],
+                        ],
+                    ];
+
+                    $fulfillResult = $this->createFulfillment($fulfillmentPayload, $shopDomain, $token);
+                    if (!empty($fulfillResult['success'])) {
+                        $newFulfillment = $fulfillResult['fulfillment'];
+                        $createdFulfillmentIds[] = $newFulfillment['id'];
+                        $results['items_fulfilled_count'] += count($foLineItemsToFulfill);
+
+                        // 6. Create Fulfillment Event (Shopify terms: 'delivered')
+                        $eventRes = $this->createFulfillmentEvent(
+                            $shopifyOrderId,
+                            $newFulfillment['id'],
+                            'delivered',
+                            [
+                                'message' => "Order items delivered by {$driverName}",
+                            ],
+                            $shopDomain,
+                            $token
+                        );
+                        if (!empty($eventRes['success'])) {
+                            $results['delivery_events_created']++;
+                        }
+                    } else {
+                        Log::warning("Shopify createFulfillment failed for order {$order->id}: " . json_encode($fulfillResult));
+                    }
+                }
+            }
+        }
+
+        // If items were already fulfilled prior to this call, verify existing fulfillments have 'delivered' event
+        if (empty($createdFulfillmentIds)) {
+            $existingFulfillments = $this->getOrderFulfillments($shopifyOrderId, $shopDomain, $token);
+            if (!empty($existingFulfillments['success'])) {
+                foreach ($existingFulfillments['fulfillments'] as $f) {
+                    $fId = $f['id'];
+                    $eventRes = $this->createFulfillmentEvent(
+                        $shopifyOrderId,
+                        $fId,
+                        'delivered',
+                        ['message' => "Order items delivered by {$driverName}"],
+                        $shopDomain,
+                        $token
+                    );
+                    if (!empty($eventRes['success'])) {
+                        $results['delivery_events_created']++;
+                    }
+                }
+            }
+        }
+
+        $results['fulfillment_ids'] = $createdFulfillmentIds;
+
+        // 7. If order status is completed (or fully fulfilled and delivered), close the order in Shopify
+        if ($isCompleted) {
+            $closeRes = $this->closeOrder($shopifyOrderId, $shopDomain, $token);
+            if (!empty($closeRes['success'])) {
+                $results['order_closed'] = true;
+                $order->shopify_status = 'closed';
+            }
+        } elseif ($isDelivered) {
+            // Keep status open while delivered
+            if ($order->shopify_status !== 'closed' && $order->shopify_status !== 'cancelled') {
+                $order->shopify_status = 'open';
+            }
+        }
+
+        // 8. Update Shopify Order Tags & Note Attributes
+        $tagsToAdd = ['Delivered'];
+        if ($isCompleted) {
+            $tagsToAdd[] = 'Completed';
+        }
+        $this->updateOrderTagsAndNote($shopifyOrderId, $tagsToAdd, [
+            ['name' => 'Delivery Status', 'value' => ucfirst($targetStatus)],
+            ['name' => 'Delivered By', 'value' => $driverName],
+            ['name' => 'Delivered At', 'value' => $deliveredAt],
+        ], $shopDomain, $token);
+
+        // 9. Save updated order in local DB
+        $order->save();
+
+        // 10. Create OrderStatusLog audit trail
+        try {
+            if (\Illuminate\Support\Facades\Schema::hasTable('order_status_logs')) {
+                $logNote = $isCompleted
+                    ? "Order marked as completed and closed in Shopify (Delivered by: {$driverName})."
+                    : "Order fulfillment synced to Shopify. Items marked delivered in Shopify terms (Delivered by: {$driverName}).";
+
+                OrderStatusLog::create([
+                    'order_id' => $order->id,
+                    'action' => 'shopify_fulfillment_synced',
+                    'new_status' => $targetStatus,
+                    'notes' => $logNote,
+                ]);
+            }
+        } catch (\Throwable $e) {
+            Log::warning("Could not create OrderStatusLog for order {$order->id}: " . $e->getMessage());
+        }
+
+        // 11. Record in ShopifySyncLog
+        $durationMs = (int)((microtime(true) - $startTime) * 1000);
+        $this->recordSyncLog([
+            'event_type' => 'fulfillment_sync',
+            'topic' => 'orders/fulfill',
+            'shop_domain' => $shopDomain,
+            'shopify_order_id' => $shopifyOrderId,
+            'order_number' => $order->order_number,
+            'local_order_id' => $order->id,
+            'status' => 'success',
+            'items_count' => $itemsToFulfill->count(),
+            'duration_ms' => $durationMs,
+            'payload' => $results,
+        ]);
+
+        return [
+            'success' => true,
+            'message' => "Order #{$order->order_number} fulfillment synced to Shopify successfully.",
+            'details' => $results,
+        ];
+    }
 }
+
 

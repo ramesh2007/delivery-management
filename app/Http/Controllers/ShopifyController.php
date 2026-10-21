@@ -428,6 +428,32 @@ class ShopifyController extends Controller
         try {
             $log = ShopifySyncLog::findOrFail($id);
 
+            // Handle retry for fulfillment sync logs
+            if ($log->event_type === 'fulfillment_sync') {
+                $targetOrder = $log->local_order_id ? \App\Models\Order::find($log->local_order_id) : null;
+                if (!$targetOrder && $log->order_number) {
+                    $targetOrder = \App\Models\Order::where('order_number', $log->order_number)->first();
+                }
+
+                if (!$targetOrder) {
+                    return response()->json([
+                        'success' => false,
+                        'error' => "Order #{$log->order_number} not found in database to retry fulfillment.",
+                    ], 404);
+                }
+
+                $res = $this->shopifyService->syncOrderFulfillmentToShopify($targetOrder, ['force' => true]);
+
+                if (!empty($res['success'])) {
+                    $log->update([
+                        'status' => 'success',
+                        'error_message' => null,
+                    ]);
+                }
+
+                return response()->json($res, !empty($res['success']) ? 200 : 400);
+            }
+
             if (empty($log->payload) || !is_array($log->payload)) {
                 return response()->json([
                     'success' => false,
@@ -455,6 +481,52 @@ class ShopifyController extends Controller
             return response()->json([
                 'success' => false,
                 'error' => 'Retry failed: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * API: Manually trigger fulfillment sync for an order to Shopify
+     * Route: POST /api/shopify/orders/{id}/sync-fulfillment
+     */
+    public function apiSyncFulfillment(Request $request, $id)
+    {
+        try {
+            $order = \App\Models\Order::with(['items', 'payment'])->find($id);
+            if (!$order) {
+                $cleanNum = ltrim((string)$id, '#');
+                $order = \App\Models\Order::with(['items', 'payment'])
+                    ->where('order_number', (string)$id)
+                    ->orWhere('order_number', $cleanNum)
+                    ->orWhere('order_number', '#' . $cleanNum)
+                    ->first();
+            }
+
+            if (!$order) {
+                return response()->json([
+                    'success' => false,
+                    'error' => "Order '{$id}' not found.",
+                ], 404);
+            }
+
+            $options = [
+                'status' => $request->input('status', $order->status),
+                'delivered_by' => $request->input('delivered_by', $order->delivered_user_name),
+                'notes' => $request->input('notes'),
+                'force' => true,
+            ];
+
+            if ($request->has('item_ids') && is_array($request->input('item_ids'))) {
+                $options['item_ids'] = $request->input('item_ids');
+            }
+
+            $result = $this->shopifyService->syncOrderFulfillmentToShopify($order, $options);
+
+            return response()->json($result, $result['success'] ? 200 : 400);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'success' => false,
+                'error' => 'Fulfillment sync failed: ' . $e->getMessage(),
             ], 500);
         }
     }

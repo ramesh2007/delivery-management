@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class TechnicianScheduled extends Model
 {
@@ -75,5 +76,29 @@ class TechnicianScheduled extends Model
     public function technician(): BelongsTo
     {
         return $this->belongsTo(User::class, 'technician_id');
+    }
+
+    /**
+     * Get previous schedule records before rescheduling.
+     */
+    public function histories(): HasMany
+    {
+        return $this->hasMany(TechnicianScheduleHistory::class, 'technician_scheduled_id')->orderBy('id', 'desc');
+    }
+
+    /**
+     * Dynamically count reschedules from history without extra database columns.
+     */
+    public function getRescheduleCountAttribute(): int
+    {
+        return $this->histories()->count();
+    }
+
+    /**
+     * Dynamically retrieve latest reschedule timestamp from history table.
+     */
+    public function getRescheduledAtAttribute()
+    {
+        return $this->histories()->latest()->value('created_at');
     }
 }

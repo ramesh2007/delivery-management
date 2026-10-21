@@ -14,6 +14,7 @@ Route::get('/shopify/connect', [ShopifyController::class, 'connect'])->name('sho
 Route::get('/shopify/callback', [ShopifyController::class, 'callback'])->name('shopify.callback');
 Route::get('/public/shopify/callback', [ShopifyController::class, 'callback']); // support full URI path callback
 Route::post('/shopify/save-settings', [ShopifyController::class, 'saveSettings'])->name('shopify.save-settings');
+Route::post('/shopify/orders/{id}/sync-fulfillment', [ShopifyController::class, 'apiSyncFulfillment'])->name('shopify.sync-fulfillment');
 
 // Shopify Webhooks fallback in web routes (in case webhook URL was configured without /api prefix)
 Route::post('/shopify/webhooks/orders-create', [ShopifyController::class, 'handleOrderWebhook']);

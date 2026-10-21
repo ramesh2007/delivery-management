@@ -293,6 +293,8 @@ class OrderManagementController extends Controller
                         'product_name' => $item->product_name,
                         'image' => $item->image,
                         'image_url' => $item->image,
+                        'gift_wrap' => $item->gift_wrap,
+                        'gift_message' => $item->gift_message,
                         'quantity' => $item->quantity,
                         'unit_price' => (float) $item->unit_price,
                         'status' => $item->status,
@@ -379,7 +381,7 @@ class OrderManagementController extends Controller
     public function updateOrderStatus(Request $request, $orderId)
     {
         $validator = Validator::make($request->all(), [
-            'status' => 'required|in:pending,picking,picked,packing,packed,ready_to_assign,out_for_delivery,in_delivery,delivered,cancelled',
+            'status' => 'required|in:pending,picking,picked,packing,packed,ready_to_assign,out_for_delivery,in_delivery,delivered,completed,cancelled',
             'notes' => 'nullable|string',
             'user_name' => 'nullable|string',
         ]);
@@ -408,14 +410,28 @@ class OrderManagementController extends Controller
         $validUserId = $dbUser ? $dbUser->id : null;
         $userName = $user ? $user->name : ($dbUser ? $dbUser->name : ($request->input('user_name') ?? 'System User'));
 
-        if ($newStatus === 'out_for_delivery' || $newStatus === 'delivered') {
-            $order->delivered_by = $validUserId;
-            $order->delivered_user_name = $userName;
-            $order->delivered_at = now();
+        if ($newStatus === 'out_for_delivery' || $newStatus === 'delivered' || $newStatus === 'completed') {
+            $order->delivered_by = $validUserId ?: $order->delivered_by;
+            $order->delivered_user_name = $userName ?: $order->delivered_user_name;
+            $order->delivered_at = $order->delivered_at ?: now();
         }
 
         $order->status = $newStatus;
         $order->save();
+
+        if (in_array($newStatus, ['delivered', 'completed'])) {
+            try {
+                $this->shopifyService->syncOrderFulfillmentToShopify($order, [
+                    'status' => $newStatus,
+                    'delivered_by' => $userName,
+                    'notes' => $request->input('notes'),
+                    'action' => 'order_status_updated',
+                    'force' => true,
+                ]);
+            } catch (\Throwable $e) {
+                Log::warning("Shopify fulfillment sync on updateOrderStatus failed for order {$order->id}: " . $e->getMessage());
+            }
+        }
 
         $user = Auth::user();
         $userId = $user ? $user->id : $request->input('user_id');

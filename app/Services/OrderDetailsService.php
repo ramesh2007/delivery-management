@@ -6,6 +6,7 @@ use App\Models\Order;
 use App\Models\OrderItem;
 use App\Models\OrderPayment;
 use App\Services\ShopifyService;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 
@@ -323,8 +324,23 @@ class OrderDetailsService
         // 1. Look in local database
         $dbOrder = $this->findLocalOrder($candidateKeys, $numericId);
 
-        // 2. Attempt to fetch corresponding Shopify order
-        $shopifyOrder = $this->findShopifyOrder($dbOrder, $candidateKeys, $orderId, $numericId);
+        // FAST PATH: If found in local database and has items, return immediately with zero external HTTP latency (sub-35ms)
+        // Unless caller explicitly requested Shopify refresh/sync with ?refresh=1 or ?with_shopify=1
+        $wantsShopifySync = request()->boolean('with_shopify') || request()->boolean('refresh') || request()->has('nocache');
+        if ($dbOrder && $dbOrder->items->isNotEmpty() && !$wantsShopifySync) {
+            $data = $this->buildMergedOrderData($dbOrder, null, $orderId);
+            return [
+                'success' => true,
+                'data' => $data,
+                'source' => 'database',
+            ];
+        }
+
+        // 2. Fallback: Only fetch from Shopify if not in DB or DB order has 0 items
+        $cacheKey = "shopify_order_lookup_" . md5($orderId . '_' . $numericId);
+        $shopifyOrder = Cache::remember($cacheKey, now()->addMinutes(10), function () use ($dbOrder, $candidateKeys, $orderId, $numericId) {
+            return $this->findShopifyOrder($dbOrder, $candidateKeys, $orderId, $numericId);
+        });
 
         // 3. If found in database
         if ($dbOrder) {
@@ -351,6 +367,41 @@ class OrderDetailsService
         foreach ($lookupKeys as $key) {
             if (isset($this->mockOrders[$key])) {
                 $mockData = $this->mockOrders[$key];
+                $mockItems = $mockData['line_items'] ?? $mockData['items'] ?? [];
+                $vsCount = 0;
+                foreach ($mockItems as &$mItem) {
+                    $mItemTags = $mItem['product_tags'] ?? ($mItem['tags'] ?? '');
+                    $mIsVs = $this->isVirtualStockTag($mItemTags);
+                    $mItem['product_tags'] = $mItemTags;
+                    $mItem['tags'] = $mItemTags;
+                    $mItem['is_vs'] = $mIsVs;
+                    $mItem['has_vs'] = $mIsVs;
+                    if ($mIsVs) {
+                        $vsCount++;
+                    }
+                }
+                unset($mItem);
+                $mockData['line_items'] = $mockItems;
+                $isAllVs = count($mockItems) > 0 && $vsCount === count($mockItems);
+                $mockData['ready_assign'] = $isAllVs;
+                $mockData['ready_to_assign'] = $isAllVs;
+                $mockData['all_items_vs'] = $isAllVs;
+                $mockData['vs_items_count'] = $vsCount;
+                if (!isset($mockData['summary'])) {
+                    $mockData['summary'] = [
+                        'total_amount' => (float)($mockData['grand_total'] ?? 0),
+                        'total_items' => count($mockItems),
+                        'picked_items' => 0,
+                        'packed_items' => 0,
+                        'delivered_items' => 0,
+                        'installation_items' => 0,
+                        'has_installation' => false,
+                    ];
+                }
+                $mockData['summary']['ready_assign'] = $isAllVs;
+                $mockData['summary']['ready_to_assign'] = $isAllVs;
+                $mockData['summary']['all_items_vs'] = $isAllVs;
+                $mockData['summary']['vs_items_count'] = $vsCount;
                 return [
                     'success' => true,
                     'data' => $mockData,
@@ -417,17 +468,38 @@ class OrderDetailsService
         }
 
         try {
-            return Order::with($relations)->where(function ($q) use ($candidateKeys, $numericId) {
-                if ($numericId !== null && is_numeric($numericId)) {
-                    $q->where('id', (int) $numericId);
+            // 1. Try exact primary key ID first
+            if ($numericId !== null && is_numeric($numericId)) {
+                $orderById = Order::with($relations)->find((int) $numericId);
+                if ($orderById) {
+                    return $orderById;
                 }
-                $q->orWhereIn('order_number', $candidateKeys);
+            }
+
+            // 2. Try exact order_number match or payment shopify_order_id match
+            $exactOrder = Order::with($relations)->where(function ($q) use ($candidateKeys) {
+                $q->whereIn('order_number', $candidateKeys)
+                  ->orWhereHas('payment', function ($pq) use ($candidateKeys) {
+                      $pq->whereIn('shopify_order_id', $candidateKeys);
+                  });
+            })->first();
+
+            if ($exactOrder) {
+                return $exactOrder;
+            }
+
+            // 3. Fallback to substring match if key length >= 4
+            return Order::with($relations)->where(function ($q) use ($candidateKeys) {
+                $hasPattern = false;
                 foreach ($candidateKeys as $k) {
-                    $q->orWhere('order_number', 'like', "%{$k}%");
+                    if (strlen($k) >= 4) {
+                        $q->orWhere('order_number', 'like', "%{$k}%");
+                        $hasPattern = true;
+                    }
                 }
-                $q->orWhereHas('payment', function ($pq) use ($candidateKeys) {
-                    $pq->whereIn('shopify_order_id', $candidateKeys);
-                });
+                if (!$hasPattern) {
+                    $q->whereRaw('1 = 0');
+                }
             })->first();
         } catch (\Throwable $e) {
             Log::error("OrderDetailsService::findLocalOrder Exception: " . $e->getMessage());
@@ -466,22 +538,32 @@ class OrderDetailsService
 
         // 3. Search Shopify API by order name/number parameter
         $searchNames = array_unique(array_filter([
-            $dbOrder?->order_number,
-            $orderId,
-            "#{$numericId}",
+            $dbOrder?->order_number ? ltrim($dbOrder->order_number, '#') : null,
             $numericId,
+            ltrim($orderId, '#'),
         ]));
 
         foreach ($searchNames as $name) {
             try {
-                $result = $this->shopifyService->getOrders(params: ['name' => $name]);
+                $cleanParam = ltrim($name, '#');
+                $result = $this->shopifyService->getOrders(params: ['name' => $cleanParam, 'limit' => 1]);
                 if (!empty($result['success']) && !empty($result['orders'])) {
                     foreach ($result['orders'] as $sOrder) {
                         $sName = (string)($sOrder['name'] ?? '');
                         $sNum = (string)($sOrder['order_number'] ?? '');
-                        if ($sName === $name || $sNum === $name || "#{$sNum}" === $name || $sName === "#{$name}") {
+                        if (
+                            $sName === $name || 
+                            $sNum === $name || 
+                            "#{$sNum}" === $name || 
+                            $sName === "#{$name}" ||
+                            $sNum === $cleanParam ||
+                            $sName === "#{$cleanParam}"
+                        ) {
                             return $sOrder;
                         }
+                    }
+                    if (count($result['orders']) === 1) {
+                        return $result['orders'][0];
                     }
                 }
             } catch (\Throwable $e) {
@@ -489,30 +571,7 @@ class OrderDetailsService
             }
         }
 
-        // 4. Scan recent orders from getOrders()
-        try {
-            $ordersResult = $this->shopifyService->getOrders();
-            if (!empty($ordersResult['success']) && !empty($ordersResult['orders'])) {
-                foreach ($ordersResult['orders'] as $sOrder) {
-                    $sId = (string)($sOrder['id'] ?? '');
-                    $sName = (string)($sOrder['name'] ?? '');
-                    $sNum = (string)($sOrder['order_number'] ?? '');
-
-                    if (
-                        in_array($sId, $candidateKeys, true) ||
-                        in_array($sName, $candidateKeys, true) ||
-                        in_array($sNum, $candidateKeys, true) ||
-                        in_array("#{$sNum}", $candidateKeys, true) ||
-                        ($dbOrder && $sName === $dbOrder->order_number)
-                    ) {
-                        return $sOrder;
-                    }
-                }
-            }
-        } catch (\Throwable $e) {
-            Log::warning("ShopifyService getOrders list scan error in OrderDetailsService: " . $e->getMessage());
-        }
-
+        // Step 4 full-scan was deleted to prevent slow 50-order fetches and 429 rate limit delays
         return null;
     }
 
@@ -577,13 +636,17 @@ class OrderDetailsService
         if ($dbOrder) {
             $status = $this->mapDbStatusToFrontend($dbOrder->status);
         } elseif ($shopifyOrder) {
-            $fulfillmentStatus = strtolower($shopifyOrder['fulfillment_status'] ?? 'unfulfilled');
-            if ($fulfillmentStatus === 'fulfilled') {
-                $status = 'Delivered';
-            } elseif ($fulfillmentStatus === 'partial') {
-                $status = 'Picking';
+            if (!empty($shopifyOrder['cancelled_at']) || !empty($shopifyOrder['cancel_reason'])) {
+                $status = 'Cancelled';
             } else {
-                $status = 'Pending';
+                $fulfillmentStatus = strtolower($shopifyOrder['fulfillment_status'] ?? 'unfulfilled');
+                if ($fulfillmentStatus === 'fulfilled') {
+                    $status = 'Delivered';
+                } elseif ($fulfillmentStatus === 'partial') {
+                    $status = 'Picking';
+                } else {
+                    $status = 'Pending';
+                }
             }
         } else {
             $status = 'Pending';
@@ -667,10 +730,13 @@ class OrderDetailsService
         $city = $shippingCity ?: 'Doha';
         $zone = $shippingAddress['province'] ?? $shippingCity ?: 'Zone A';
 
-        // Additional Shopify attributes
         $channel = isset($shopifyOrder['source_name']) ? ucfirst(str_replace('_', ' ', $shopifyOrder['source_name'])) : 'Web';
-        $shopifyStatus = ucfirst($shopifyOrder['fulfillment_status'] ?? ($dbOrder?->status === 'delivered' ? 'fulfilled' : 'unfulfilled'));
-        $notes = $shopifyOrder['note'] ?? 'Handle with care. Call upon arrival.';
+        if ($dbOrder?->status === 'cancelled' || $dbOrder?->shopify_status === 'cancelled' || !empty($shopifyOrder['cancelled_at']) || !empty($shopifyOrder['cancel_reason'])) {
+            $shopifyStatus = 'Cancelled';
+        } else {
+            $shopifyStatus = ucfirst($shopifyOrder['fulfillment_status'] ?? ($dbOrder?->fulfillment_status ?: ($dbOrder?->status === 'delivered' ? 'fulfilled' : 'unfulfilled')));
+        }
+        $notes = $dbOrder?->notes ?: ($shopifyOrder['note'] ?? $shopifyOrder['notes'] ?? 'Handle with care. Call upon arrival.');
         $tags = !empty($shopifyOrder['tags']) ? $shopifyOrder['tags'] : 'Standard';
         $returnCount = count($shopifyOrder['refunds'] ?? []);
         if ($returnCount === 0 && $dbOrder) {
@@ -691,6 +757,9 @@ class OrderDetailsService
         $packedItemsCount = count(array_filter($mergedLineItems, fn($i) => in_array(strtolower($i['custom_status'] ?? ''), ['packed', 'delivered'])));
         $deliveredItemsCount = count(array_filter($mergedLineItems, fn($i) => strtolower($i['custom_status'] ?? '') === 'delivered'));
         $installationItemsCount = count(array_filter($mergedLineItems, fn($i) => !empty($i['is_installable']) || !empty($i['installation'])));
+        $actualItemCount = count($mergedLineItems);
+        $vsItemsCount = count(array_filter($mergedLineItems, fn($i) => !empty($i['is_vs'])));
+        $readyAssign = ($actualItemCount > 0 && $vsItemsCount === $actualItemCount);
 
         // Operational assignments from DB
         $pickerName = $dbOrder?->assigned_user_name ?: ($dbOrder?->assignedUser?->name ?? null);
@@ -777,9 +846,6 @@ class OrderDetailsService
             'status' => $status,
             'payment_method' => $paymentMethod,
             'payment_status' => $financialStatus,
-            'custom_payment_method' => $paymentMethod,
-            'custom_payment_status' => $paymentStatusStr,
-            'financial_status' => $financialStatus,
             'paid_amount' => $paidAmount,
             'total_outstanding' => $totalOutstanding,
             'currency' => $currency,
@@ -809,6 +875,9 @@ class OrderDetailsService
             'custom_picking_status' => "{$pickedItemsCount}/{$totalItemsCount} Picked",
             'custom_packing_status' => "{$packedItemsCount}/{$totalItemsCount} Packed",
             'custom_shopify_status' => $shopifyStatus,
+            'shopify_status' => $dbOrder?->shopify_status ?: (!empty($shopifyOrder['cancelled_at']) ? 'cancelled' : 'open'),
+            'cancelled_at' => $dbOrder?->cancelled_at ? $dbOrder->cancelled_at->toIso8601String() : ($shopifyOrder['cancelled_at'] ?? null),
+            'notes' => $dbOrder?->notes ?: ($shopifyOrder['note'] ?? $shopifyOrder['notes'] ?? null),
             'custom_notes' => $notes,
             'custom_shipping_address_line1' => $addressLine1,
             'custom_shipping_address_line2' => $addressLine2,
@@ -839,13 +908,12 @@ class OrderDetailsService
                 'started_at' => $dbOrder->driverAssignment->started_at ? $dbOrder->driverAssignment->started_at->toIso8601String() : null,
                 'delivered_at' => $dbOrder->driverAssignment->delivered_at ? $dbOrder->driverAssignment->delivered_at->toIso8601String() : null,
             ] : null,
-            'driver_user' => $dbOrder?->driverAssignment ? [
-                'id' => (int)$dbOrder->driverAssignment->assigned_driver_user_id,
-                'name' => $dbOrder->driverAssignment->driver_name,
-                'assigned_at' => $dbOrder->driverAssignment->assigned_at ? $dbOrder->driverAssignment->assigned_at->toIso8601String() : null,
-            ] : null,
             'pickers' => $pickersList,
             'packers' => $packersList,
+            'ready_assign' => (bool)$readyAssign,
+            'ready_to_assign' => (bool)$readyAssign,
+            'all_items_vs' => (bool)$readyAssign,
+            'vs_items_count' => (int)$vsItemsCount,
             'summary' => [
                 'total_amount' => (float)$grandTotal,
                 'total_items' => $totalItemsCount,
@@ -854,10 +922,12 @@ class OrderDetailsService
                 'delivered_items' => $deliveredItemsCount,
                 'installation_items' => $installationItemsCount,
                 'has_installation' => $installationItemsCount > 0,
+                'ready_assign' => (bool)$readyAssign,
+                'ready_to_assign' => (bool)$readyAssign,
+                'all_items_vs' => (bool)$readyAssign,
+                'vs_items_count' => (int)$vsItemsCount,
             ],
-            // Both line_items and items for universal consumer compatibility
             'line_items' => $mergedLineItems,
-            'items' => $mergedLineItems,
             'created_at' => $dbOrder?->created_at ? $dbOrder->created_at->toIso8601String() : date('c', $createdAtTime),
             'updated_at' => $dbOrder?->updated_at ? $dbOrder->updated_at->toIso8601String() : date('c', $createdAtTime),
         ];
@@ -957,15 +1027,56 @@ class OrderDetailsService
 
                 $itemStatus = ucfirst(strtolower($dbItem->status ?: 'pending'));
 
-                $merged[] = [
+                // Resolve product tags
+                $prodId = (string)($dbItem->product_id ?: ($matchingShopifyItem['product_id'] ?? ''));
+                $itemTags = $dbItem->product_tags
+                    ?: ($matchingShopifyItem['product_tags'] ?? ($matchingShopifyItem['tags'] ?? ($matchingShopifyItem['product']['tags'] ?? null)));
+
+                if (empty($itemTags) && !empty($prodId)) {
+                    $itemTags = $this->getProductTags($prodId);
+                }
+
+                if (is_array($itemTags)) {
+                    $itemTags = implode(', ', array_filter($itemTags));
+                }
+
+                if ($dbItem && empty($dbItem->product_tags) && !empty($itemTags)) {
+                    try {
+                        $dbItem->updateQuietly(['product_tags' => $itemTags]);
+                    } catch (\Throwable $e) {}
+                }
+
+                $isVs = $this->isVirtualStockTag($itemTags);
+
+                $giftWrap = $dbItem->gift_wrap;
+                $giftMessage = $dbItem->gift_message;
+                if ((empty($giftWrap) || empty($giftMessage)) && !empty($matchingShopifyItem['properties']) && is_array($matchingShopifyItem['properties'])) {
+                    foreach ($matchingShopifyItem['properties'] as $prop) {
+                        if (!is_array($prop)) continue;
+                        $pName = trim((string)($prop['name'] ?? ''));
+                        $lowerName = strtolower($pName);
+                        if (empty($giftWrap) && in_array($lowerName, ['giftwrap', 'gift wrap', 'gift_wrap', 'gift-wrap'], true)) {
+                            $val = trim((string)($prop['value'] ?? ''));
+                            if ($val !== '') {
+                                $giftWrap = $val;
+                            }
+                        }
+                        if (empty($giftMessage) && in_array($lowerName, ['gift message', 'gift_message', 'giftmessage', 'gift-message', 'message'], true)) {
+                            $val = trim((string)($prop['value'] ?? ''));
+                            if ($val !== '') {
+                                $giftMessage = $val;
+                            }
+                        }
+                    }
+                }
+
+                $itemArr = [
                     'id' => $dbItem->line_item_id ? (is_numeric($dbItem->line_item_id) ? (int)$dbItem->line_item_id : $dbItem->line_item_id) : ($matchingShopifyItem['id'] ?? $dbItem->id),
-                    'db_item_id' => $dbItem->id,
                     'item_id' => $dbItem->id,
                     'line_item_id' => $dbItem->line_item_id ?: ($matchingShopifyItem['id'] ?? null),
                     'product_id' => $dbItem->product_id ?: ($matchingShopifyItem['product_id'] ?? null),
                     'variant_id' => $matchingShopifyItem['variant_id'] ?? null,
                     'name' => $dbItem->product_name ?: ($matchingShopifyItem['name'] ?? $matchingShopifyItem['title'] ?? ('Product Item ' . ($index + 1))),
-                    'title' => $dbItem->product_name ?: ($matchingShopifyItem['name'] ?? $matchingShopifyItem['title'] ?? ('Product Item ' . ($index + 1))),
                     'product_name' => $dbItem->product_name ?: ($matchingShopifyItem['name'] ?? $matchingShopifyItem['title'] ?? ('Product Item ' . ($index + 1))),
                     'sku' => $dbItem->product_code ?: ($matchingShopifyItem['sku'] ?? ('SKU-' . rand(1000, 9999))),
                     'product_code' => $dbItem->product_code ?: ($matchingShopifyItem['sku'] ?? ('SKU-' . rand(1000, 9999))),
@@ -973,41 +1084,63 @@ class OrderDetailsService
                     'custom_barcode' => $dbItem->barcode ?: ($matchingShopifyItem['barcode'] ?? ('890' . sprintf('%09d', abs(crc32($dbItem->id))))),
                     'quantity' => $qty,
                     'price' => $price,
-                    'unit_price' => $price,
                     'amount' => $amount,
                     'warehouse' => 'Fulfillment Center Hilal (F01)',
                     'custom_bin' => $bin,
                     'status' => $dbItem->status,
                     'custom_status' => $itemStatus,
                     'image' => $image,
-                    'image_url' => $image,
-                    'product_image' => $image,
-                    'product_image_url' => $image,
+                    'product_tags' => $itemTags,
+                    'gift_wrap' => $giftWrap ?: null,
+                    'gift_message' => $giftMessage ?: null,
+                    'is_vs' => $isVs,
                     'is_installable' => (bool)$dbItem->is_installable,
-                    'installation_type' => $instType,
-                    'installation_level' => $instLevel,
-                    'installation' => $installationObj,
-                    'is_scheduled_assigned' => $isScheduledAssigned,
-                    'is_flagged' => (bool)$dbItem->is_flagged,
-                    'flag_reason' => $dbItem->flag_reason,
-                    'is_packer_verified' => (bool)$dbItem->is_packer_verified,
-                    'packer_verified_by' => $dbItem->packer_verified_by ? (int)$dbItem->packer_verified_by : null,
-                    'packer_verified_user_name' => $dbItem->packer_verified_user_name ?: ($dbItem->packerVerifiedUser?->name ?? null),
-                    'packer_verified_at' => $dbItem->packer_verified_at ? $dbItem->packer_verified_at->toIso8601String() : null,
-                    'assigned_to' => $dbItem->assigned_to ? (int)$dbItem->assigned_to : null,
-                    'assigned_user_name' => $dbItem->assigned_user_name ?: ($dbItem->assignedUser?->name ?? null),
-                    'assigned_at' => $dbItem->assigned_at ? $dbItem->assigned_at->toIso8601String() : null,
-                    'picked_by' => $dbItem->picked_by ? (int)$dbItem->picked_by : null,
-                    'picked_user_name' => $dbItem->picked_user_name ?: ($dbItem->pickedUser?->name ?? null),
-                    'picked_at' => $dbItem->picked_at ? $dbItem->picked_at->toIso8601String() : null,
-                    'packed_by' => $dbItem->packed_by ? (int)$dbItem->packed_by : null,
-                    'packed_user_name' => $dbItem->packed_user_name ?: ($dbItem->packedUser?->name ?? null),
-                    'packed_at' => $dbItem->packed_at ? $dbItem->packed_at->toIso8601String() : null,
-                    'delivered_by' => $dbItem->delivered_by ? (int)$dbItem->delivered_by : null,
-                    'delivered_user_name' => $dbItem->delivered_user_name ?: ($dbItem->deliveredUser?->name ?? null),
-                    'delivered_at' => $dbItem->delivered_at ? $dbItem->delivered_at->toIso8601String() : null,
-                    'metafields' => $matchingShopifyItem['metafields'] ?? [],
                 ];
+
+                if (!empty($installationObj)) {
+                    $itemArr['installation'] = $installationObj;
+                    $itemArr['installation_type'] = $instType;
+                    $itemArr['installation_level'] = $instLevel;
+                    $itemArr['is_scheduled_assigned'] = $isScheduledAssigned;
+                }
+
+                if ($dbItem->is_flagged) {
+                    $itemArr['is_flagged'] = true;
+                    $itemArr['flag_reason'] = $dbItem->flag_reason;
+                }
+
+                if ($dbItem->is_packer_verified) {
+                    $itemArr['is_packer_verified'] = true;
+                    $itemArr['packer_verified_by'] = (int)$dbItem->packer_verified_by;
+                    $itemArr['packer_verified_user_name'] = $dbItem->packer_verified_user_name ?: ($dbItem->packerVerifiedUser?->name ?? null);
+                    $itemArr['packer_verified_at'] = $dbItem->packer_verified_at ? $dbItem->packer_verified_at->toIso8601String() : null;
+                }
+
+                if ($dbItem->assigned_to || $dbItem->assigned_user_name) {
+                    $itemArr['assigned_to'] = (int)$dbItem->assigned_to;
+                    $itemArr['assigned_user_name'] = $dbItem->assigned_user_name ?: ($dbItem->assignedUser?->name ?? null);
+                    $itemArr['assigned_at'] = $dbItem->assigned_at ? $dbItem->assigned_at->toIso8601String() : null;
+                }
+
+                if ($dbItem->picked_by || $dbItem->picked_user_name) {
+                    $itemArr['picked_by'] = (int)$dbItem->picked_by;
+                    $itemArr['picked_user_name'] = $dbItem->picked_user_name ?: ($dbItem->pickedUser?->name ?? null);
+                    $itemArr['picked_at'] = $dbItem->picked_at ? $dbItem->picked_at->toIso8601String() : null;
+                }
+
+                if ($dbItem->packed_by || $dbItem->packed_user_name) {
+                    $itemArr['packed_by'] = (int)$dbItem->packed_by;
+                    $itemArr['packed_user_name'] = $dbItem->packed_user_name ?: ($dbItem->packedUser?->name ?? null);
+                    $itemArr['packed_at'] = $dbItem->packed_at ? $dbItem->packed_at->toIso8601String() : null;
+                }
+
+                if ($dbItem->delivered_by || $dbItem->delivered_user_name) {
+                    $itemArr['delivered_by'] = (int)$dbItem->delivered_by;
+                    $itemArr['delivered_user_name'] = $dbItem->delivered_user_name ?: ($dbItem->deliveredUser?->name ?? null);
+                    $itemArr['delivered_at'] = $dbItem->delivered_at ? $dbItem->delivered_at->toIso8601String() : null;
+                }
+
+                $merged[] = $itemArr;
             }
         }
 
@@ -1042,15 +1175,48 @@ class OrderDetailsService
                 'is_scheduled_assigned' => false,
             ] : null;
 
-            $merged[] = [
+            $prodId = (string)($sItem['product_id'] ?? '');
+            $itemTags = $sItem['product_tags'] ?? ($sItem['tags'] ?? ($sItem['product']['tags'] ?? null));
+
+            if (empty($itemTags) && !empty($prodId)) {
+                $itemTags = $this->getProductTags($prodId);
+            }
+
+            if (is_array($itemTags)) {
+                $itemTags = implode(', ', array_filter($itemTags));
+            }
+
+            $isVs = $this->isVirtualStockTag($itemTags);
+
+            $giftWrap = null;
+            $giftMessage = null;
+            if (!empty($sItem['properties']) && is_array($sItem['properties'])) {
+                foreach ($sItem['properties'] as $prop) {
+                    if (!is_array($prop)) continue;
+                    $pName = trim((string)($prop['name'] ?? ''));
+                    $lowerName = strtolower($pName);
+                    if (in_array($lowerName, ['giftwrap', 'gift wrap', 'gift_wrap', 'gift-wrap'], true)) {
+                        $val = trim((string)($prop['value'] ?? ''));
+                        if ($val !== '') {
+                            $giftWrap = $val;
+                        }
+                    }
+                    if (in_array($lowerName, ['gift message', 'gift_message', 'giftmessage', 'gift-message'], true)) {
+                        $val = trim((string)($prop['value'] ?? ''));
+                        if ($val !== '') {
+                            $giftMessage = $val;
+                        }
+                    }
+                }
+            }
+
+            $itemArr = [
                 'id' => $sItem['id'] ?? ($index + 1),
-                'db_item_id' => null,
                 'item_id' => $sItem['id'] ?? ($index + 1),
                 'line_item_id' => $sItem['id'] ?? null,
                 'product_id' => $sItem['product_id'] ?? null,
                 'variant_id' => $sItem['variant_id'] ?? null,
                 'name' => $sItem['name'] ?? $sItem['title'] ?? ('Product Item ' . ($index + 1)),
-                'title' => $sItem['name'] ?? $sItem['title'] ?? ('Product Item ' . ($index + 1)),
                 'product_name' => $sItem['name'] ?? $sItem['title'] ?? ('Product Item ' . ($index + 1)),
                 'sku' => !empty($sItem['sku']) ? $sItem['sku'] : ('SKU-' . rand(1000, 9999)),
                 'product_code' => !empty($sItem['sku']) ? $sItem['sku'] : ('SKU-' . rand(1000, 9999)),
@@ -1058,44 +1224,76 @@ class OrderDetailsService
                 'custom_barcode' => (string)$barcode,
                 'quantity' => $qty,
                 'price' => $price,
-                'unit_price' => $price,
                 'amount' => $amount,
                 'warehouse' => 'Fulfillment Center Hilal (F01)',
                 'custom_bin' => $bin,
                 'status' => 'pending',
                 'custom_status' => 'Pending',
                 'image' => $image,
-                'image_url' => $image,
-                'product_image' => $image,
-                'product_image_url' => $image,
+                'product_tags' => $itemTags,
+                'gift_wrap' => $giftWrap ?: null,
+                'gift_message' => $giftMessage ?: null,
+                'is_vs' => $isVs,
                 'is_installable' => (bool)($sItem['is_installable'] ?? false),
-                'installation_type' => $instType,
-                'installation_level' => $instLevel,
-                'installation' => $installationObj,
-                'is_scheduled_assigned' => false,
-                'is_flagged' => false,
-                'flag_reason' => null,
-                'is_packer_verified' => false,
-                'packer_verified_by' => null,
-                'packer_verified_user_name' => null,
-                'packer_verified_at' => null,
-                'assigned_to' => null,
-                'assigned_user_name' => null,
-                'assigned_at' => null,
-                'picked_by' => null,
-                'picked_user_name' => null,
-                'picked_at' => null,
-                'packed_by' => null,
-                'packed_user_name' => null,
-                'packed_at' => null,
-                'delivered_by' => null,
-                'delivered_user_name' => null,
-                'delivered_at' => null,
-                'metafields' => $sItem['metafields'] ?? [],
             ];
+
+            if (!empty($installationObj)) {
+                $itemArr['installation'] = $installationObj;
+                $itemArr['installation_type'] = $instType;
+                $itemArr['installation_level'] = $instLevel;
+                $itemArr['is_scheduled_assigned'] = false;
+            }
+
+            $merged[] = $itemArr;
         }
 
         return $merged;
+    }
+
+    /**
+     * Retrieve and cache product tags by Shopify Product ID.
+     */
+    public function getProductTags(?string $productId): ?string
+    {
+        if (empty($productId)) {
+            return null;
+        }
+
+        static $memoryCache = [];
+        if (array_key_exists($productId, $memoryCache)) {
+            return $memoryCache[$productId];
+        }
+
+        $tags = Cache::remember("shopify_product_tags_{$productId}", now()->addHours(6), function () use ($productId) {
+            try {
+                // 1. Check if any local OrderItem has product_tags for this product_id
+                $localTags = OrderItem::where('product_id', $productId)
+                    ->whereNotNull('product_tags')
+                    ->where('product_tags', '!=', '')
+                    ->value('product_tags');
+
+                if (!empty($localTags)) {
+                    return $localTags;
+                }
+
+                // 2. Query Shopify product details
+                $res = $this->shopifyService->getProduct((string) $productId);
+                if (!empty($res['success']) && !empty($res['product'])) {
+                    $rawTags = $res['product']['tags'] ?? null;
+                    if (is_array($rawTags)) {
+                        $rawTags = implode(', ', array_filter($rawTags));
+                    }
+                    return !empty($rawTags) ? (string) $rawTags : null;
+                }
+            } catch (\Throwable $e) {
+                Log::warning("OrderDetailsService::getProductTags exception for {$productId}: " . $e->getMessage());
+            }
+
+            return null;
+        });
+
+        $memoryCache[$productId] = $tags;
+        return $tags;
     }
 
     /**
@@ -1121,5 +1319,39 @@ class OrderDetailsService
         ];
 
         return $statusMap[$dbStatusRaw] ?? ucfirst(str_replace('_', ' ', $dbStatusRaw ?: 'pending'));
+    }
+
+    /**
+     * Determine if given product tags indicate a Virtual Stock (VS) item.
+     */
+    public function isVirtualStockTag(mixed $tags): bool
+    {
+        if (empty($tags)) {
+            return false;
+        }
+
+        if (is_array($tags)) {
+            $tagList = $tags;
+        } else {
+            $tagList = preg_split('/[,;\n]+/', (string)$tags);
+        }
+
+        foreach ($tagList as $tag) {
+            $t = strtoupper(trim((string)$tag, " \t\n\r\0\x0B()[]{}'\""));
+            if ($t === '') {
+                continue;
+            }
+            if ($t === 'VS' || $t === 'VIRTUAL STOCK' || $t === 'VIRTUAL_STOCK' || $t === 'VIRTUALSTOCK') {
+                return true;
+            }
+            if (preg_match('/^VS([-_:\s]|$)/i', $t)) {
+                return true;
+            }
+            if (str_contains(strtolower($t), 'virtual stock') || str_contains(strtolower($t), 'virtual_stock')) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

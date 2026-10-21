@@ -721,7 +721,12 @@ class PickerManagementController extends Controller
                 'bag_count' => $order->bag_count,
     
                 'shipping_address' => $order->shipping_address,
-    
+                 // Order-level product tag: VS if any item has VS
+                'product_tag' => $order->items->contains(function ($item) {
+                    return collect(explode(',', $item->product_tags ?? ''))
+                        ->map(fn($tag) => trim($tag))
+                        ->contains('VS');
+                }) ? 'VS' : null,
                 'items' => $order->items->map(function ($item) {
     
                     return [
@@ -746,7 +751,9 @@ class PickerManagementController extends Controller
                         'imageUrl' => $item->imageUrl
                             ?? $item->image_url
                             ?? $item->image,
-    
+                        'product_tag' => collect(explode(',', $item->product_tags ?? ''))
+                                        ->map(fn($tag) => trim($tag))
+                                        ->contains('VS') ? 'VS' : null,
                         'status' => $item->status,
     
                         'is_assigned' => !is_null($item->assigned_to),
@@ -927,171 +934,139 @@ class PickerManagementController extends Controller
     //     ]);
     // }
     public function apiOrdersById(Request $request, $id)
-{
-    $idStr = trim((string) $id);
-
-    /*
-    |--------------------------------------------------------------------------
-    | Get orders where at least ONE item is assigned to this picker
-    |
-    | Example:
-    |
-    | Order #1101
-    |   Item 1 -> assigned_to = 5
-    |   Item 2 -> assigned_to = 6
-    |   Item 3 -> NULL
-    |
-    | Picker 5 will see Order #1101 with Item 1.
-    | Picker 6 will see Order #1101 with Item 2.
-    |--------------------------------------------------------------------------
-    */
-
-    $query = Order::with([
-        'items' => function ($query) use ($idStr) {
-            // Only return items assigned to requested picker
-            $query->where('assigned_to', $idStr);
-        }
-    ])
-    ->where('status', 'picking')
-    ->orWhere('status', 'pending')
-
-    // Important:
-    // Order must have at least one item assigned
-    // to this requested picker.
-    ->whereHas('items', function ($query) use ($idStr) {
-        $query->where('assigned_to', $idStr);
-    });
-
-
-    /*
-    |--------------------------------------------------------------------------
-    | Pagination
-    |--------------------------------------------------------------------------
-    */
-
-    $orders = $query
-        ->orderBy('created_at', 'desc')
-        ->paginate(15);
-
-
-    /*
-    |--------------------------------------------------------------------------
-    | Format orders
-    |--------------------------------------------------------------------------
-    */
-
-    $orders->getCollection()->transform(function ($order) {
-
-        return [
-            'order_number' => $order->order_number,
-
-            'created_at' => $order->created_at
-                ? $order->created_at->toIso8601String()
-                : null,
-
-            'status' => $order->status,
-
-            'customer_name' => $order->customer_name ?? null,
-
-            'bag_count' => (string) ($order->bag_count ?? 0),
+        {
+            $idStr = trim((string) $id);
 
             /*
             |--------------------------------------------------------------------------
-            | ONLY items assigned to this picker
+            | Get orders where at least ONE item is assigned to this picker
+            |
+            | Example:
+            |
+            | Order #1101
+            |   Item 1 -> assigned_to = 5
+            |   Item 2 -> assigned_to = 6
+            |   Item 3 -> NULL
+            |
+            | Picker 5 will see Order #1101 with Item 1.
+            | Picker 6 will see Order #1101 with Item 2.
             |--------------------------------------------------------------------------
-            |
-            | Even if the order has 3 items, if this picker owns
-            | only 1 item, only that 1 item is returned.
-            |
             */
 
-            'items' => $order->items
-                ->map(function ($item) {
+            $query = Order::with([
+                'items' => function ($query) use ($idStr) {
+                    // Only return items assigned to requested picker
+                    $query->where('assigned_to', $idStr);
+                }
+            ])
+            ->where('status', 'picking')
+            ->orWhere('status', 'pending')
 
-                    return [
-                        'id' => $item->id,
-
-                        'line_item_id' => $item->line_item_id,
-
-                        'product_name' => $item->product_name,
-
-                        'sku' => $item->product_code ?? null,
-
-                        'barcode' => $item->barcode,
-
-                        'quantity' => (int) $item->quantity,
-
-                        'unit_price' => $item->unit_price !== null
-                            ? (string) $item->unit_price
-                            : null,
-
-                        'vendor' => $item->vendor
-                            ?? $item->vendor_name
-                            ?? null,
-
-                        'rack' => $item->rack ?? null,
-
-                        'bin' => $item->bin ?? null,
-
-                        'imageUrl' => $item->image
-                            ?? $item->image_url
-                            ?? null,
-
-                        'status' => $item->status,
-
-                        'assigned_to' => $item->assigned_to,
-
-                        'assigned_user_name' =>
-                            $item->assigned_user_name,
-
-                        'assigned_at' => $item->assigned_at
-                            ? $item->assigned_at->toIso8601String()
-                            : null,
-
-                        'is_assigned' => !empty($item->assigned_to),
-
-                        'is_flagged' => (bool) $item->is_flagged,
-
-                        'flag_reason' => $item->flag_reason,
-                    ];
-                })
-                ->values(),
-        ];
-    });
+            // Important:
+            // Order must have at least one item assigned
+            // to this requested picker.
+            ->whereHas('items', function ($query) use ($idStr) {
+                $query->where('assigned_to', $idStr);
+            });
 
 
-    /*
-    |--------------------------------------------------------------------------
-    | Response
-    |--------------------------------------------------------------------------
-    */
+            /*
+            |--------------------------------------------------------------------------
+            | Pagination
+            |--------------------------------------------------------------------------
+            */
 
-    return response()->json([
-        'success' => true,
+            $orders = $query
+                ->orderBy('created_at', 'desc')
+                ->paginate(15);
 
-        'data' => $orders->items(),
 
-        'pagination' => [
-            'current_page' => $orders->currentPage(),
+            /*
+            |--------------------------------------------------------------------------
+            | Format orders
+            |--------------------------------------------------------------------------
+            */
 
-            'per_page' => $orders->perPage(),
+            $orders->getCollection()->transform(function ($order) {
 
-            'total' => $orders->total(),
+                return [
+                    'order_number' => $order->order_number,
 
-            'last_page' => $orders->lastPage(),
+                    'created_at' => $order->created_at
+                        ? $order->created_at->toIso8601String()
+                        : null,
 
-            'from' => $orders->firstItem(),
+                    'status' => $order->status,
 
-            'to' => $orders->lastItem(),
+                    /*
+                    |--------------------------------------------------------------------------
+                    | ONLY items assigned to this picker
+                    |--------------------------------------------------------------------------
+                    |
+                    | Even if the order has 3 items, if this picker owns
+                    | only 1 item, only that 1 item is returned.
+                    |
+                    */
 
-            'has_more_pages' => $orders->hasMorePages(),
+                    'items' => $order->items
+                        ->map(function ($item) {
 
-            'next_page_url' => $orders->nextPageUrl(),
+                            return [
+                                'line_item_id' => $item->line_item_id,
 
-            'previous_page_url' => $orders->previousPageUrl(),
-        ],
-    ]);
-}
+                                'product_name' => $item->product_name,
+
+                                'sku' => $item->sku ?? $item->product_code ?? null,
+
+                                'barcode' => $item->barcode,
+
+                                'quantity' => (int) $item->quantity,
+
+                                'rack' => $item->rack ?? null,
+
+                                'bin' => $item->bin ?? null,
+
+                                'imageUrl' => $item->image
+                                    ?? $item->image_url
+                                    ?? null,
+
+                                'product_tags' => $item->product_tags,
+
+                                'status' => $item->status,
+
+                                'is_installable' => (bool) $item->is_installable,
+
+                                'is_assigned' => !empty($item->assigned_to),
+
+                                'is_flagged' => (bool) $item->is_flagged,
+
+                                'flag_reason' => $item->flag_reason,
+                            ];
+                        })
+                        ->values(),
+                ];
+            });
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | Response
+            |--------------------------------------------------------------------------
+            */
+
+            return response()->json([
+                'success' => true,
+
+                'data' => $orders->items(),
+
+                'pagination' => [
+                    'current_page' => $orders->currentPage(),
+                    'per_page' => $orders->perPage(),
+                    'total' => $orders->total(),
+                    'has_more_pages' => $orders->hasMorePages(),
+                ],
+            ]);
+        }
     /**
      * Get completed/picked order details for a specific user ID where items were picked by that user
      * Route: GET /api/orders-complete/{id}
@@ -1133,453 +1108,130 @@ class PickerManagementController extends Controller
     //     ]);
     // }
     public function apiOrdersComplete(Request $request, $id)
-{
-    $idStr = trim((string) $id);
-
-    /*
-    |--------------------------------------------------------------------------
-    | Pagination
-    |--------------------------------------------------------------------------
-    */
-    $perPage = (int) $request->query('per_page', 15);
-    $perPage = max(1, min($perPage, 100));
-
-    /*
-    |--------------------------------------------------------------------------
-    | Get picked orders
-    |
-    | Order status = picked
-    | AND item is either:
-    |   - picked_by = requested user
-    |   - OR assigned_to = requested user AND item status = picked
-    |--------------------------------------------------------------------------
-    */
-    $orders = Order::with([
-        'items.assignedUser',
-        'items.pickedUser',
-        'items.packedUser',
-        'items.deliveredUser',
-        'items.packerVerifiedUser',
-        'assignedUser',
-        'deliveredUser',
-    ])
-    ->where('status', 'picked')
-    ->whereHas('items', function ($q) use ($idStr) {
-        $q->where('picked_by', $idStr)
-            ->orWhere(function ($sub) use ($idStr) {
-                $sub->where('assigned_to', $idStr)
-                    ->where('status', 'picked');
-            });
-    })
-    ->orderBy('updated_at', 'desc')
-    ->paginate($perPage);
-
-    /*
-    |--------------------------------------------------------------------------
-    | Format orders
-    |--------------------------------------------------------------------------
-    */
-    $orders->getCollection()->transform(function ($order) use ($idStr) {
+    {
+        $idStr = trim((string) $id);
 
         /*
         |--------------------------------------------------------------------------
-        | Pickers
+        | Pagination
         |--------------------------------------------------------------------------
         */
-        $pickers = $order->items
-            ->map(function ($item) {
-
-                if ($item->picked_by || $item->picked_user_name) {
-                    return [
-                        'id' => $item->picked_by
-                            ? (int) $item->picked_by
-                            : null,
-
-                        'name' => $item->pickedUser
-                            ? $item->pickedUser->name
-                            : ($item->picked_user_name ?? 'Picker User'),
-
-                        'picked_at' => $item->picked_at
-                            ? $item->picked_at->toIso8601String()
-                            : null,
-                    ];
-                }
-
-                return null;
-            })
-            ->filter()
-            ->unique('name')
-            ->values();
+        $perPage = (int) $request->query('per_page', 15);
+        $perPage = max(1, min($perPage, 100));
 
         /*
         |--------------------------------------------------------------------------
-        | Packers
+        | Get picked orders
+        |
+        | Order status = picked
+        | AND item is either:
+        |   - picked_by = requested user
+        |   - OR assigned_to = requested user AND item status = picked
         |--------------------------------------------------------------------------
         */
-        $packers = $order->items
-            ->map(function ($item) {
-
-                if ($item->packed_by || $item->packed_user_name) {
-                    return [
-                        'id' => $item->packed_by
-                            ? (int) $item->packed_by
-                            : null,
-
-                        'name' => $item->packedUser
-                            ? $item->packedUser->name
-                            : ($item->packed_user_name ?? 'Packer User'),
-
-                        'packed_at' => $item->packed_at
-                            ? $item->packed_at->toIso8601String()
-                            : null,
-                    ];
-                }
-
-                return null;
-            })
-            ->filter()
-            ->unique('name')
-            ->values();
+        $orders = Order::with([
+            'items.assignedUser',
+            'items.pickedUser',
+            'items.packedUser',
+            'items.deliveredUser',
+            'items.packerVerifiedUser',
+            'assignedUser',
+            'deliveredUser',
+        ])
+        ->where('status', 'picked')
+        ->whereHas('items', function ($q) use ($idStr) {
+            $q->where('picked_by', $idStr)
+                ->orWhere(function ($sub) use ($idStr) {
+                    $sub->where('assigned_to', $idStr)
+                        ->where('status', 'picked');
+                });
+        })
+        ->orderBy('updated_at', 'desc')
+        ->paginate($perPage);
 
         /*
         |--------------------------------------------------------------------------
-        | Only items related to this user
+        | Format orders
         |--------------------------------------------------------------------------
         */
-        $items = $order->items
-            ->filter(function ($item) use ($idStr) {
-                return (string) $item->picked_by === $idStr
-                    || (
-                        (string) $item->assigned_to === $idStr
-                        && $item->status === 'picked'
-                    );
-            })
-            ->values();
-
-        return [
-            'order_id' => $order->id,
-
-            'order_number' => $order->order_number,
-
-            'status' => $order->status,
-
-            'bag_count' => (int) ($order->bag_count ?? 0),
-
-            'assigned_to' => $order->assigned_to
-                ? (int) $order->assigned_to
-                : null,
-
-            'assigned_user_name' => $order->assigned_user_name
-                ?: ($order->assignedUser->name ?? null),
-
-            'picked_by' => $order->items
-                ->whereNotNull('picked_by')
-                ->pluck('picked_by')
-                ->first()
-                ? (int) $order->items
-                    ->whereNotNull('picked_by')
-                    ->pluck('picked_by')
-                    ->first()
-                : (
-                    $order->assigned_to
-                        ? (int) $order->assigned_to
-                        : null
-                ),
-
-            'picked_user_name' => $order->assigned_user_name
-                ?: ($order->assignedUser->name ?? null),
-
-            'packed_by' => $order->items
-                ->whereNotNull('packed_by')
-                ->pluck('packed_by')
-                ->first()
-                ? (int) $order->items
-                    ->whereNotNull('packed_by')
-                    ->pluck('packed_by')
-                    ->first()
-                : null,
-
-            'packed_user_name' => $order->items
-                ->whereNotNull('packed_user_name')
-                ->pluck('packed_user_name')
-                ->first()
-                ?: (
-                    $order->items
-                        ->map(fn($i) => $i->packedUser->name ?? null)
-                        ->filter()
-                        ->first()
-                ),
-
-            'delivered_by' => $order->delivered_by
-                ? (int) $order->delivered_by
-                : null,
-
-            'delivered_user_name' => $order->delivered_user_name
-                ?: ($order->deliveredUser->name ?? null),
-
-            'assigned_user' => $order->assigned_to ? [
-                'id' => (int) $order->assigned_to,
-
-                'name' => $order->assignedUser
-                    ? $order->assignedUser->name
-                    : ($order->assigned_user_name ?? 'Picker User'),
-
-                'assigned_at' => $order->assigned_at
-                    ? $order->assigned_at->toIso8601String()
-                    : null,
-            ] : null,
-
-            'driver_user' => ($order->delivered_by || $order->delivered_user_name)
-                ? [
-                    'id' => $order->delivered_by
-                        ? (int) $order->delivered_by
-                        : null,
-
-                    'name' => $order->deliveredUser
-                        ? $order->deliveredUser->name
-                        : ($order->delivered_user_name ?? 'Driver User'),
-
-                    'delivered_at' => $order->delivered_at
-                        ? $order->delivered_at->toIso8601String()
-                        : null,
-                ]
-                : null,
-
-            'pickers' => $pickers,
-
-            'packers' => $packers,
-
-            'customer' => [
-                'name' => $order->customer_name ?? 'N/A',
-
-                'phone' => $order->customer_phone ?? 'N/A',
-
-                'delivery_address' => $order->delivery_address ?? 'N/A',
-            ],
-
-            'summary' => [
-                'total_amount' => (float) $order->total_amount,
-
-                'total_items' => $order->items->count(),
-
-                'picked_items' => $order->items
-                    ->where('status', 'picked')
-                    ->count(),
-
-                'packed_items' => $order->items
-                    ->where('status', 'packed')
-                    ->count(),
-
-                'delivered_items' => $order->items
-                    ->where('status', 'delivered')
-                    ->count(),
-            ],
+        $orders->getCollection()->transform(function ($order) use ($idStr) {
 
             /*
             |--------------------------------------------------------------------------
-            | Items
+            | Only items related to this user (picked by or assigned+picked)
             |--------------------------------------------------------------------------
             */
-            'items' => $items->map(function ($item) {
+            $items = $order->items
+                ->filter(function ($item) use ($idStr) {
+                    return (string) $item->picked_by === $idStr
+                        || (
+                            (string) $item->assigned_to === $idStr
+                            && $item->status === 'picked'
+                        );
+                })
+                ->values();
 
-                return [
-                    'item_id' => $item->id,
+            return [
+                'order_number' => $order->order_number,
 
-                    'line_item_id' => $item->line_item_id,
+                'status' => $order->status,
 
-                    'product_id' => $item->product_id,
+                'created_at' => $order->created_at
+                    ? $order->created_at->toIso8601String()
+                    : null,
 
-                    'product_code' => $item->product_code,
+                /*
+                |--------------------------------------------------------------------------
+                | Items
+                |--------------------------------------------------------------------------
+                */
+                'items' => $items->map(function ($item) {
 
-                    'barcode' => $item->barcode,
+                    return [
+                        'line_item_id'   => $item->line_item_id,
 
-                    'product_name' => $item->product_name,
+                        'product_id'     => $item->product_id,
 
-                    'image' => $item->image,
+                        'product_code'   => $item->product_code,
 
-                    'image_url' => $item->image,
+                        'barcode'        => $item->barcode,
 
-                    'quantity' => (int) $item->quantity,
+                        'product_name'   => $item->product_name,
 
-                    'unit_price' => (float) $item->unit_price,
+                        'image_url'      => $item->image ?? $item->image_url ?? null,
 
-                    'status' => $item->status,
+                        'quantity'       => (int) $item->quantity,
 
-                    'is_packer_verified' => (bool) $item->is_packer_verified,
+                        'status'         => $item->status,
 
-                    'packer_verified_user' => (
-                        $item->packer_verified_by
-                        || $item->packer_verified_user_name
-                    ) ? [
-                        'id' => $item->packer_verified_by
-                            ? (int) $item->packer_verified_by
-                            : null,
+                        'is_installable' => (bool) $item->is_installable,
 
-                        'name' => $item->packerVerifiedUser
-                            ? $item->packerVerifiedUser->name
-                            : ($item->packer_verified_user_name ?? 'Packer User'),
+                        'is_flagged'     => (bool) $item->is_flagged,
 
-                        'verified_at' => $item->packer_verified_at
-                            ? $item->packer_verified_at->toIso8601String()
-                            : null,
-                    ] : null,
+                        'flag_reason'    => $item->flag_reason,
+                    ];
+                })->values(),
+            ];
+        });
 
-                    'is_installable' => (bool) $item->is_installable,
+        /*
+        |--------------------------------------------------------------------------
+        | Response
+        |--------------------------------------------------------------------------
+        */
+        return response()->json([
+            'success' => true,
 
-                    'installation' => $item->installation ? [
-                        'id' => $item->installation->id,
+            'data' => $orders->items(),
 
-                        'installation_type' => $item->installation->installation_type,
-
-                        'installation_level' => $item->installation->installation_level,
-                    ] : null,
-
-                    'is_flagged' => (bool) $item->is_flagged,
-
-                    'flag_reason' => $item->flag_reason,
-
-                    'assigned_to' => $item->assigned_to
-                        ? (int) $item->assigned_to
-                        : null,
-
-                    'assigned_user_name' => $item->assigned_user_name
-                        ?: ($item->assignedUser->name ?? null),
-
-                    'picked_by' => $item->picked_by
-                        ? (int) $item->picked_by
-                        : ($item->picked_user_name ?: null),
-
-                    'picked_user_name' => $item->picked_user_name
-                        ?: ($item->pickedUser->name ?? null),
-
-                    'packed_by' => $item->packed_by
-                        ? (int) $item->packed_by
-                        : ($item->packed_user_name ?: null),
-
-                    'packed_user_name' => $item->packed_user_name
-                        ?: ($item->packedUser->name ?? null),
-
-                    'delivered_by' => $item->delivered_by
-                        ? (int) $item->delivered_by
-                        : ($item->delivered_user_name ?: null),
-
-                    'delivered_user_name' => $item->delivered_user_name
-                        ?: ($item->deliveredUser->name ?? null),
-
-                    'assigned_user' => $item->assigned_to ? [
-                        'id' => (int) $item->assigned_to,
-
-                        'name' => $item->assignedUser
-                            ? $item->assignedUser->name
-                            : ($item->assigned_user_name ?? 'Picker User'),
-
-                        'assigned_at' => $item->assigned_at
-                            ? $item->assigned_at->toIso8601String()
-                            : null,
-                    ] : null,
-
-                    'picked_user' => (
-                        $item->picked_by
-                        || $item->picked_user_name
-                    ) ? [
-                        'id' => $item->picked_by
-                            ? (int) $item->picked_by
-                            : null,
-
-                        'name' => $item->pickedUser
-                            ? $item->pickedUser->name
-                            : ($item->picked_user_name ?? 'Picker User'),
-
-                        'picked_at' => $item->picked_at
-                            ? $item->picked_at->toIso8601String()
-                            : null,
-                    ] : null,
-
-                    'packed_user' => (
-                        $item->packed_by
-                        || $item->packed_user_name
-                    ) ? [
-                        'id' => $item->packed_by
-                            ? (int) $item->packed_by
-                            : null,
-
-                        'name' => $item->packedUser
-                            ? $item->packedUser->name
-                            : ($item->packed_user_name ?? 'Packer User'),
-
-                        'packed_at' => $item->packed_at
-                            ? $item->packed_at->toIso8601String()
-                            : null,
-                    ] : null,
-
-                    'delivered_user' => (
-                        $item->delivered_by
-                        || $item->delivered_user_name
-                    ) ? [
-                        'id' => $item->delivered_by
-                            ? (int) $item->delivered_by
-                            : null,
-
-                        'name' => $item->deliveredUser
-                            ? $item->deliveredUser->name
-                            : ($item->delivered_user_name ?? 'Driver User'),
-
-                        'delivered_at' => $item->delivered_at
-                            ? $item->delivered_at->toIso8601String()
-                            : null,
-                    ] : null,
-
-                    'picked_at' => $item->picked_at
-                        ? $item->picked_at->toIso8601String()
-                        : null,
-
-                    'packed_at' => $item->packed_at
-                        ? $item->packed_at->toIso8601String()
-                        : null,
-
-                    'delivered_at' => $item->delivered_at
-                        ? $item->delivered_at->toIso8601String()
-                        : null,
-                ];
-            })->values(),
-
-            'created_at' => $order->created_at
-                ? $order->created_at->toIso8601String()
-                : null,
-        ];
-    });
-
-    /*
-    |--------------------------------------------------------------------------
-    | Response - same pagination structure as index()
-    |--------------------------------------------------------------------------
-    */
-    return response()->json([
-        'success' => true,
-
-        'data' => $orders->items(),
-
-        'pagination' => [
-            'current_page' => $orders->currentPage(),
-
-            'per_page' => $orders->perPage(),
-
-            'total' => $orders->total(),
-
-            'last_page' => $orders->lastPage(),
-
-            'from' => $orders->firstItem(),
-
-            'to' => $orders->lastItem(),
-
-            'has_more_pages' => $orders->hasMorePages(),
-
-            'next_page_url' => $orders->nextPageUrl(),
-
-            'previous_page_url' => $orders->previousPageUrl(),
-        ],
-    ]);
-}
+            'pagination' => [
+                'current_page'  => $orders->currentPage(),
+                'per_page'      => $orders->perPage(),
+                'total'         => $orders->total(),
+                'has_more_pages' => $orders->hasMorePages(),
+            ],
+        ]);
+    }
 
     /**
      * Assign order to picker ("Assign Me")

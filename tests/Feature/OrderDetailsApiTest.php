@@ -134,8 +134,8 @@ class OrderDetailsApiTest extends TestCase
             $mock->shouldReceive('getOrders')->andReturn(['success' => true, 'orders' => []]);
         });
 
-        // Test GET /api/admin/order-details/{order_id}
-        $response = $this->getJson("/api/admin/order-details/{$order->id}");
+        // Test GET /api/admin/order-details/{order_id} with refresh to trigger Shopify merge
+        $response = $this->getJson("/api/admin/order-details/{$order->id}?refresh=1");
 
         $response->assertStatus(200)
             ->assertJson([
@@ -181,10 +181,9 @@ class OrderDetailsApiTest extends TestCase
         $this->assertEquals(45678, $data['line_items'][0]['variant_id']); // enriched from Shopify
         $this->assertEquals('Pending', $data['line_items'][1]['custom_status']);
 
-        // Test that both line_items and items exist
+        // Test that line_items exists and redundant duplicate items array is omitted for payload optimization
         $this->assertArrayHasKey('line_items', $data);
-        $this->assertArrayHasKey('items', $data);
-        $this->assertEquals($data['line_items'], $data['items']);
+        $this->assertArrayNotHasKey('items', $data);
     }
 
     public function test_order_details_returns_404_when_order_not_found()

@@ -40,7 +40,7 @@ return [
         'api_secret' => env('SHOPIFY_API_SECRET'),
         'shop_domain' => env('SHOPIFY_SHOP_DOMAIN'),
         'access_token' => env('SHOPIFY_ACCESS_TOKEN'),
-        'scopes' => env('SHOPIFY_SCOPES', 'read_products,read_orders,read_customers,read_inventory,read_locations,read_collections'),
+        'scopes' => env('SHOPIFY_SCOPES', 'read_products,read_orders,write_orders,read_customers,read_inventory,read_locations,read_collections,read_fulfillments,write_fulfillments,read_assigned_fulfillment_orders,write_assigned_fulfillment_orders,read_merchant_managed_fulfillment_orders,write_merchant_managed_fulfillment_orders,read_third_party_fulfillment_orders,write_third_party_fulfillment_orders'),
         'redirect_uri' => env('SHOPIFY_REDIRECT_URI', 'https://delivery-management.hmws.qatar123.com/public/shopify/callback'),
     ],
 

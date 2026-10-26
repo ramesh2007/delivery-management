@@ -26,619 +26,7 @@ class PickerManagementController extends Controller
      * Auto-syncs with Shopify silently so mobile users don't need a manual sync endpoint.
      * Route: GET /api/orders
      */
-    // public function index(Request $request)
-    // {
-    //     // Auto-sync orders from Shopify if requested or by default
-    //     if ($request->boolean('auto_sync', true)) {
-    //         try {
-    //             $this->shopifyService->syncOrdersToDatabase();
-    //         } catch (\Exception $e) {
-    //             // Continue using local DB if sync fails
-    //         }
-    //     }
-
-    //     $assignedToFilter = $request->query('assigned_to');
-
-    //     $relations = [
-    //         'items' => function ($q) use ($assignedToFilter) {
-    //             $q->where('status', 'pending');
-    //             if (!empty($assignedToFilter)) {
-    //                 $q->where('assigned_to', $assignedToFilter);
-    //             } else {
-    //                 $q->whereNull('assigned_to');
-    //             }
-    //         },
-
-    //         'items.assignedUser',
-    //         'items.pickedUser',
-    //         'items.packedUser',
-    //         'items.deliveredUser',
-    //         'items.packerVerifiedUser',
-
-    //         'assignedUser',
-    //         'pickedUser',
-    //         'packedUser',
-    //         'deliveredUser',
-    //     ];
-
-    //     static $hasOrderInstallationsTable = null;
-    //     if ($hasOrderInstallationsTable === null) {
-    //         try {
-    //             $hasOrderInstallationsTable = \Illuminate\Support\Facades\Schema::hasTable('order_installations');
-    //         } catch (\Throwable $e) {
-    //             $hasOrderInstallationsTable = false;
-    //         }
-    //     }
-
-    //     if ($hasOrderInstallationsTable) {
-    //         $relations[] = 'items.installation';
-    //     }
-
-    //     $query = Order::with($relations);
-
-    //     // Optional order status filter
-    //     if ($request->has('status') && !empty($request->query('status'))) {
-    //         $query->where('status', $request->query('status'));
-    //     }
-
-    //     if (!empty($assignedToFilter)) {
-
-    //         $query->whereHas('items', function ($q) use ($assignedToFilter) {
-    //             $q->where('assigned_to', $assignedToFilter)
-    //               ->where('status', 'pending');
-    //         });
-
-    //         $query->with([
-    //             'items' => function ($q) use ($assignedToFilter) {
-    //                 $q->where('assigned_to', $assignedToFilter)
-    //                   ->where('status', 'pending');
-    //             },
-    //             'items.assignedUser',
-    //             'items.pickedUser',
-    //             'items.packedUser',
-    //             'items.deliveredUser',
-    //             'items.packerVerifiedUser',
-    //         ]);
-
-    //     } elseif ($request->boolean('unassigned')) {
-
-    //         $query->whereHas('items', function ($q) {
-    //             $q->whereNull('assigned_to')
-    //               ->where('status', 'pending');
-    //         });
-
-    //     } else {
-
-    //         $query->whereHas('items', function ($q) {
-    //             $q->whereNull('assigned_to')
-    //               ->where('status', 'pending');
-    //         });
-    //     }
-
-    //     // Search
-    //     if ($request->has('search')) {
-
-    //         $search = $request->query('search');
-
-    //         $query->where(function ($q) use ($search) {
-
-    //             $q->where('order_number', 'like', "%{$search}%")
-    //               ->orWhere('customer_name', 'like', "%{$search}%")
-    //               ->orWhere('customer_phone', 'like', "%{$search}%")
-    //               ->orWhere('assigned_user_name', 'like', "%{$search}%");
-
-    //         });
-    //     }
-
-    //     $orders = $query
-    //         ->orderBy('created_at', 'desc')
-    //         ->get();
-
-    //     // Format response
-    //     $formattedOrders = $orders
-    //         ->map(function ($order) use ($assignedToFilter) {
-
-    //             $order->setRelation(
-    //                 'items',
-    //                 $order->items
-    //                     ->filter(function ($item) use ($assignedToFilter) {
-    //                         if (!empty($assignedToFilter)) {
-    //                             return $item->status === 'pending'
-    //                                 && (string)$item->assigned_to === (string)$assignedToFilter;
-    //                         }
-    //                         return $item->status === 'pending'
-    //                             && is_null($item->assigned_to);
-    //                     })
-    //                     ->values()
-    //             );
-
-    //             // If no matching items left, don't return the order
-    //             if ($order->items->isEmpty()) {
-    //                 return null;
-    //             }
-
-    //             $totalItems = $order->items->count();
-
-    //             $pickedItems = $order->items
-    //                 ->where('status', 'picked')
-    //                 ->count();
-
-    //             $packedItems = $order->items
-    //                 ->where('status', 'packed')
-    //                 ->count();
-
-    //             $deliveredItems = $order->items
-    //                 ->where('status', 'delivered')
-    //                 ->count();
-
-    //             $pickers = $order->items
-    //                 ->map(function ($item) {
-
-    //                     if ($item->picked_by || $item->picked_user_name) {
-
-    //                         return [
-    //                             'id' => $item->picked_by
-    //                                 ? (int) $item->picked_by
-    //                                 : null,
-
-    //                             'name' => $item->pickedUser
-    //                                 ? $item->pickedUser->name
-    //                                 : ($item->picked_user_name ?? 'Picker User'),
-
-    //                             'picked_at' => $item->picked_at
-    //                                 ? $item->picked_at->toIso8601String()
-    //                                 : null,
-    //                         ];
-    //                     }
-
-    //                     return null;
-
-    //                 })
-    //                 ->filter()
-    //                 ->unique('name')
-    //                 ->values();
-
-    //             $packers = $order->items
-    //                 ->map(function ($item) {
-
-    //                     if ($item->packed_by || $item->packed_user_name) {
-
-    //                         return [
-    //                             'id' => $item->packed_by
-    //                                 ? (int) $item->packed_by
-    //                                 : null,
-
-    //                             'name' => $item->packedUser
-    //                                 ? $item->packedUser->name
-    //                                 : ($item->packed_user_name ?? 'Packer User'),
-
-    //                             'packed_at' => $item->packed_at
-    //                                 ? $item->packed_at->toIso8601String()
-    //                                 : null,
-    //                         ];
-    //                     }
-
-    //                     return null;
-
-    //                 })
-    //                 ->filter()
-    //                 ->unique('name')
-    //                 ->values();
-
-    //             return [
-    //                 'order_id' => $order->id,
-
-    //                 'order_number' => $order->order_number,
-
-    //                 'status' => $order->status,
-
-    //                 'bag_count' => (int) ($order->bag_count ?? 0),
-
-    //                 'assigned_user' => $order->assigned_to ? [
-    //                     'id' => (int) $order->assigned_to,
-
-    //                     'name' => $order->assignedUser
-    //                         ? $order->assignedUser->name
-    //                         : ($order->assigned_user_name ?? 'Picker User'),
-
-    //                     'assigned_at' => $order->assigned_at
-    //                         ? $order->assigned_at->toIso8601String()
-    //                         : null,
-    //                 ] : null,
-
-    //                 'driver_user' => ($order->delivered_by || $order->delivered_user_name)
-    //                     ? [
-    //                         'id' => $order->delivered_by
-    //                             ? (int) $order->delivered_by
-    //                             : null,
-
-    //                         'name' => $order->deliveredUser
-    //                             ? $order->deliveredUser->name
-    //                             : ($order->delivered_user_name ?? 'Driver User'),
-
-    //                         'delivered_at' => $order->delivered_at
-    //                             ? $order->delivered_at->toIso8601String()
-    //                             : null,
-    //                     ]
-    //                     : null,
-
-    //                 'pickers' => $pickers,
-
-    //                 'packers' => $packers,
-
-    //                 'customer' => [
-    //                     'name' => $order->customer_name ?? 'N/A',
-
-    //                     'phone' => $order->customer_phone ?? 'N/A',
-
-    //                     'delivery_address' => $order->delivery_address ?? 'N/A',
-    //                 ],
-
-    //                 'summary' => [
-    //                     'total_amount' => (float) $order->total_amount,
-
-    //                     'total_items' => $totalItems,
-
-    //                     'picked_items' => $pickedItems,
-
-    //                     'packed_items' => $packedItems,
-
-    //                     'delivered_items' => $deliveredItems,
-    //                 ],
-
-    //                 'items' => $order->items
-    //                     ->map(function ($item) {
-
-    //                         return [
-    //                             'item_id' => $item->id,
-
-    //                             'line_item_id' => $item->line_item_id,
-
-    //                             'product_id' => $item->product_id,
-
-    //                             'product_code' => $item->product_code,
-
-    //                             'barcode' => $item->barcode,
-
-    //                             'product_name' => $item->product_name,
-
-    //                             'image' => $item->image,
-
-    //                             'image_url' => $item->image,
-
-    //                             'product_image' => $item->image,
-
-    //                             'product_image_url' => $item->image,
-
-    //                             'quantity' => $item->quantity,
-
-    //                             'unit_price' => (float) $item->unit_price,
-
-    //                             'status' => $item->status,
-
-    //                             'is_packer_verified' => (bool) $item->is_packer_verified,
-
-    //                             'packer_verified_user' =>
-    //                                 ($item->packer_verified_by || $item->packer_verified_user_name)
-    //                                     ? [
-    //                                         'id' => $item->packer_verified_by
-    //                                             ? (int) $item->packer_verified_by
-    //                                             : null,
-
-    //                                         'name' => $item->packerVerifiedUser
-    //                                             ? $item->packerVerifiedUser->name
-    //                                             : ($item->packer_verified_user_name ?? 'Packer User'),
-
-    //                                         'verified_at' => $item->packer_verified_at
-    //                                             ? $item->packer_verified_at->toIso8601String()
-    //                                             : null,
-    //                                     ]
-    //                                     : null,
-    //                             'is_installable' => (bool) $item->is_installable,
-    //                             'installation' => $item->installation ? [
-    //                                 'id' => $item->installation->id,
-    //                                 'installation_type' => $item->installation->installation_type,
-    //                                 'installation_level' => $item->installation->installation_level,
-    //                             ] : null,
-    //                             'is_flagged' => $item->is_flagged,
-    //                             'flag_reason' => $item->flag_reason,
-    //                             'assigned_user' => $item->assigned_to
-    //                                 ? [
-    //                                     'id' => (int) $item->assigned_to,
-
-    //                                     'name' => $item->assignedUser
-    //                                         ? $item->assignedUser->name
-    //                                         : ($item->assigned_user_name ?? 'Picker User'),
-
-    //                                     'assigned_at' => $item->assigned_at
-    //                                         ? $item->assigned_at->toIso8601String()
-    //                                         : null,
-    //                                 ]
-    //                                 : null,
-
-    //                             'picked_user' =>
-    //                                 ($item->picked_by || $item->picked_user_name)
-    //                                     ? [
-    //                                         'id' => $item->picked_by
-    //                                             ? (int) $item->picked_by
-    //                                             : null,
-
-    //                                         'name' => $item->pickedUser
-    //                                             ? $item->pickedUser->name
-    //                                             : ($item->picked_user_name ?? 'Picker User'),
-
-    //                                         'picked_at' => $item->picked_at
-    //                                             ? $item->picked_at->toIso8601String()
-    //                                             : null,
-    //                                     ]
-    //                                     : null,
-
-    //                             'packed_user' =>
-    //                                 ($item->packed_by || $item->packed_user_name)
-    //                                     ? [
-    //                                         'id' => $item->packed_by
-    //                                             ? (int) $item->packed_by
-    //                                             : null,
-
-    //                                         'name' => $item->packedUser
-    //                                             ? $item->packedUser->name
-    //                                             : ($item->packed_user_name ?? 'Packer User'),
-
-    //                                         'packed_at' => $item->packed_at
-    //                                             ? $item->packed_at->toIso8601String()
-    //                                             : null,
-    //                                     ]
-    //                                     : null,
-
-    //                             'delivered_user' =>
-    //                                 ($item->delivered_by || $item->delivered_user_name)
-    //                                     ? [
-    //                                         'id' => $item->delivered_by
-    //                                             ? (int) $item->delivered_by
-    //                                             : null,
-
-    //                                         'name' => $item->deliveredUser
-    //                                             ? $item->deliveredUser->name
-    //                                             : ($item->delivered_user_name ?? 'Driver User'),
-
-    //                                         'delivered_at' => $item->delivered_at
-    //                                             ? $item->delivered_at->toIso8601String()
-    //                                             : null,
-    //                                     ]
-    //                                     : null,
-
-    //                             'picked_at' => $item->picked_at
-    //                                 ? $item->picked_at->toIso8601String()
-    //                                 : null,
-
-    //                             'packed_at' => $item->packed_at
-    //                                 ? $item->packed_at->toIso8601String()
-    //                                 : null,
-
-    //                             'delivered_at' => $item->delivered_at
-    //                                 ? $item->delivered_at->toIso8601String()
-    //                                 : null,
-    //                         ];
-    //                     })
-    //                     ->values(),
-
-    //                 'created_at' => $order->created_at
-    //                     ? $order->created_at->toIso8601String()
-    //                     : null,
-    //             ];
-    //         })
-    //         ->filter()
-    //         ->values();
-
-    //     return response()->json([
-    //         'success' => true,
-    //         'message' => 'Orders retrieved successfully.',
-    //         'count' => $formattedOrders->count(),
-    //         'data' => $formattedOrders,
-    //     ]);
-    // }
-//   public function index(Request $request)
-// {
-//     $query = Order::query()
-//         ->with([
-//             'items',
-//             // 'items.vendor',
-//             // 'items.product',
-//             // 'items.rack',
-//             // 'items.bin',
-//         ]);
-
-//     /*
-//     |--------------------------------------------------------------------------
-//     | Search
-//     |--------------------------------------------------------------------------
-//     */
-//     if ($request->filled('search')) {
-//         $search = $request->input('search');
-
-//         $query->where(function ($q) use ($search) {
-//             $q->where('order_number', 'like', "%{$search}%")
-//                 ->orWhere('customer_name', 'like', "%{$search}%")
-//                 ->orWhere('customer_phone', 'like', "%{$search}%")
-//                 ->orWhere('email', 'like', "%{$search}%");
-//         });
-//     }
-
-//     /*
-//     |--------------------------------------------------------------------------
-//     | Order status filter
-//     |--------------------------------------------------------------------------
-//     */
-//     if ($request->filled('status')) {
-//         $query->where('status', $request->input('status'));
-//     }
-
-//     /*
-//     |--------------------------------------------------------------------------
-//     | Assigned picker filter
-//     |--------------------------------------------------------------------------
-//     */
-//     if ($request->filled('assigned_to')) {
-//         $assignedTo = $request->input('assigned_to');
-
-//         $query->whereHas('items', function ($q) use ($assignedTo) {
-//             $q->where('assigned_to', $assignedTo);
-//         });
-//     }
-
-//     /*
-//     |--------------------------------------------------------------------------
-//     | Pagination
-//     |--------------------------------------------------------------------------
-//     | Always 15 orders per page
-//     |--------------------------------------------------------------------------
-//     */
-//     $orders = $query
-//         ->orderBy('created_at', 'desc')
-//         ->paginate(15);
-
-//     /*
-//     |--------------------------------------------------------------------------
-//     | Format orders
-//     |--------------------------------------------------------------------------
-//     */
-//     $orders->getCollection()->transform(function ($order) {
-
-//         return [
-//             /*
-//             |--------------------------------------------------------------------------
-//             | Order details
-//             |--------------------------------------------------------------------------
-//             */
-//             'order_number' => $order->order_number,
-
-//             'created_at' => $order->created_at
-//                 ? $order->created_at->toIso8601String()
-//                 : null,
-
-//             'status' => $order->status,
-
-//             'financial_status' => $order->financial_status,
-
-//             'total_price' => $order->total_price,
-
-//             'currency' => $order->currency,
-
-//             'customer_name' => $order->customer_name,
-
-//             'email' => $order->email,
-
-//             'phone' => $order->customer_phone ?? $order->phone,
-
-//             'bag_count' => $order->bag_count,
-
-//             'shipping_address' => $order->shipping_address,
-
-//             /*
-//             |--------------------------------------------------------------------------
-//             | Order items
-//             |--------------------------------------------------------------------------
-//             */
-//             'items' => $order->items->map(function ($item) {
-
-//                 return [
-//                     'line_item_id' => $item->line_item_id,
-
-//                     'product_name' => $item->product_name,
-
-//                     'sku' => $item->sku ?? $item->product_code,
-
-//                     'barcode' => $item->barcode,
-
-//                     'quantity' => (int) $item->quantity,
-
-//                     'unit_price' => $item->unit_price,
-
-//                     'vendor' => $item->vendor,
-
-//                     'rack' => $item->rack,
-
-//                     'bin' => $item->bin,
-
-//                     'imageUrl' => $item->imageUrl
-//                         ?? $item->image_url
-//                         ?? $item->image,
-
-//                     'status' => $item->status,
-
-//                     'is_assigned' => !is_null($item->assigned_to),
-
-//                     'is_flagged' => (bool) $item->is_flagged,
-
-//                     'flag_reason' => $item->flag_reason,
-
-//                     /*
-//                     |--------------------------------------------------------------------------
-//                     | Uncomment if required later
-//                     |--------------------------------------------------------------------------
-//                     */
-
-//                     // 'item_id' => $item->id,
-
-//                     // 'product_id' => $item->product_id,
-
-//                     // 'assigned_to' => $item->assigned_to,
-
-//                     // 'assigned_user_name' => $item->assigned_user_name,
-
-//                     // 'picked_by' => $item->picked_by,
-
-//                     // 'picked_user_name' => $item->picked_user_name,
-
-//                     // 'picked_at' => $item->picked_at,
-
-//                     // 'packed_by' => $item->packed_by,
-
-//                     // 'packed_user_name' => $item->packed_user_name,
-
-//                     // 'packed_at' => $item->packed_at,
-
-//                     // 'delivered_by' => $item->delivered_by,
-
-//                     // 'delivered_user_name' => $item->delivered_user_name,
-
-//                     // 'delivered_at' => $item->delivered_at,
-
-//                     // 'is_packer_verified' => $item->is_packer_verified,
-
-//                     // 'packer_verified_by' => $item->packer_verified_by,
-
-//                     // 'packer_verified_user_name' => $item->packer_verified_user_name,
-
-//                     // 'packer_verified_at' => $item->packer_verified_at,
-//                 ];
-//             })->values(),
-//         ];
-//     });
-
-//     /*
-//     |--------------------------------------------------------------------------
-//     | Response
-//     |--------------------------------------------------------------------------
-//     */
-//     return response()->json([
-//         'success' => true,
-
-//         'data' => $orders->items(),
-
-//         'pagination' => [
-//             'current_page' => $orders->currentPage(),
-//             'per_page' => $orders->perPage(),
-//             'total' => $orders->total(),
-//             'last_page' => $orders->lastPage(),
-//             'from' => $orders->firstItem(),
-//             'to' => $orders->lastItem(),
-//             'has_more_pages' => $orders->hasMorePages(),
-//             'next_page_url' => $orders->nextPageUrl(),
-//             'previous_page_url' => $orders->previousPageUrl(),
-//         ],
-//     ]);
-// }
+   
 
     public function index(Request $request)
     {
@@ -727,6 +115,9 @@ class PickerManagementController extends Controller
                         ->map(fn($tag) => trim($tag))
                         ->contains('VS');
                 }) ? 'VS' : null,
+                'is_installable' => $order->items->contains(function ($item) {
+                    return (bool) $item->is_installable;
+                }),
                 'items' => $order->items->map(function ($item) {
     
                     return [
@@ -755,9 +146,8 @@ class PickerManagementController extends Controller
                                         ->map(fn($tag) => trim($tag))
                                         ->contains('VS') ? 'VS' : null,
                         'status' => $item->status,
-    
+                        'is_installable' => $item->is_installable,
                         'is_assigned' => !is_null($item->assigned_to),
-    
                         'is_flagged' => (bool) $item->is_flagged,
     
                         'flag_reason' => $item->flag_reason,
@@ -797,142 +187,7 @@ class PickerManagementController extends Controller
      */
 
 
-    // public function apiOrdersById(Request $request, $id)
-    // {
-    //     $idStr = trim((string) $id);
-    
-    //     /*
-    //     |--------------------------------------------------------------------------
-    //     | Get orders from local database
-    //     |
-    //     | orders.status = picking
-    //     | order_items.assigned_to = requested picker/user ID
-    //     |--------------------------------------------------------------------------
-    //     */
-    //     $query = Order::with([
-    //         'items' => function ($query) use ($idStr) {
-    //             $query->where('assigned_to', $idStr);
-    //         }
-    //     ])
-    //     ->where('status', 'picking')
-    //     ->whereHas('items', function ($query) use ($idStr) {
-    //         $query->where('assigned_to', $idStr);
-    //     });
-    
-    //     /*
-    //     |--------------------------------------------------------------------------
-    //     | Pagination
-    //     |--------------------------------------------------------------------------
-    //     */
-    //     $orders = $query
-    //         ->orderBy('created_at', 'desc')
-    //         ->paginate(15);
-    
-    //     /*
-    //     |--------------------------------------------------------------------------
-    //     | Format orders
-    //     |--------------------------------------------------------------------------
-    //     */
-    //     $orders->getCollection()->transform(function ($order) {
-    
-    //         return [
-    //             'order_number' => $order->order_number,
-    
-    //             'created_at' => $order->created_at
-    //                 ? $order->created_at->toIso8601String()
-    //                 : null,
-    
-    //             'status' => $order->status,
-    
-    //             // Keep commented for now
-    //             // 'financial_status' => $order->financial_status,
-    
-    //             // 'total_price' => $order->total_price,
-    
-    //             // 'currency' => $order->currency,
-    
-    //             'customer_name' => $order->customer_name ?? null,
-    
-    //             // 'email' => $order->email,
-    
-    //             // 'phone' => $order->customer_phone
-    //             //     ?? $order->phone,
-    
-    //             'bag_count' => (string) ($order->bag_count ?? 0),
-    
-    //             // 'shipping_address' => $order->shipping_address,
-    
-    //             /*
-    //             |--------------------------------------------------------------------------
-    //             | Only items assigned to this picker
-    //             |--------------------------------------------------------------------------
-    //             */
-    //             'items' => $order->items
-    //                 ->map(function ($item) {
-    
-    //                     return [
-    //                         'line_item_id' => $item->line_item_id,
-    
-    //                         'product_name' => $item->product_name,
-    
-    //                         'sku' => $item->product_code ?? null,
-    
-    //                         'barcode' => $item->barcode,
-    
-    //                         'quantity' => (int) $item->quantity,
-    
-    //                         'unit_price' => $item->unit_price !== null
-    //                             ? (string) $item->unit_price
-    //                             : null,
-    
-    //                         'vendor' => $item->vendor
-    //                             ?? $item->vendor_name
-    //                             ?? null,
-    
-    //                         'rack' => $item->rack ?? null,
-    
-    //                         'bin' => $item->bin ?? null,
-    
-    //                         'imageUrl' => $item->image
-    //                             ?? $item->image_url
-    //                             ?? null,
-    
-    //                         'status' => $item->status,
-    
-    //                         'is_assigned' => !empty($item->assigned_to),
-    
-    //                         'is_flagged' => (bool) $item->is_flagged,
-    
-    //                         'flag_reason' => $item->flag_reason,
-    //                     ];
-    //                 })
-    //                 ->values(),
-    //         ];
-    //     });
-    
-    //     /*
-    //     |--------------------------------------------------------------------------
-    //     | Response
-    //     |--------------------------------------------------------------------------
-    //     */
-    //     return response()->json([
-    //         'success' => true,
-    
-    //         'data' => $orders->items(),
-    
-    //         'pagination' => [
-    //             'current_page' => $orders->currentPage(),
-    //             'per_page' => $orders->perPage(),
-    //             'total' => $orders->total(),
-    //             'last_page' => $orders->lastPage(),
-    //             'from' => $orders->firstItem(),
-    //             'to' => $orders->lastItem(),
-    //             'has_more_pages' => $orders->hasMorePages(),
-    //             'next_page_url' => $orders->nextPageUrl(),
-    //             'previous_page_url' => $orders->previousPageUrl(),
-    //         ],
-    //     ]);
-    // }
+
     public function apiOrdersById(Request $request, $id)
         {
             $idStr = trim((string) $id);
@@ -997,6 +252,11 @@ class PickerManagementController extends Controller
                         : null,
 
                     'status' => $order->status,
+                    'product_tag' => $order->items->contains(function ($item) {
+                                        return collect(explode(',', $item->product_tags ?? ''))
+                                            ->map(fn($tag) => trim($tag))
+                                            ->contains('VS');
+                                    }) ? 'VS' : null,
 
                     /*
                     |--------------------------------------------------------------------------
@@ -1030,7 +290,11 @@ class PickerManagementController extends Controller
                                     ?? $item->image_url
                                     ?? null,
 
-                                'product_tags' => $item->product_tags,
+                                'product_tag' => collect(explode(',', $item->product_tags ?? ''))
+                                    ->map(fn ($tag) => trim($tag))
+                                    ->contains(fn ($tag) => strcasecmp($tag, 'VS') === 0)
+                                        ? 'VS'
+                                        : null,
 
                                 'status' => $item->status,
 
@@ -1073,40 +337,7 @@ class PickerManagementController extends Controller
      *
      * Returns an array of orders & picked line items by user_id.
      */
-    // public function apiOrdersComplete(Request $request, $id)
-    // {
-    //     $idStr = trim((string) $id);
-
-    //   $completedOrders = Order::with([
-    //         'items.assignedUser',
-    //         'items.pickedUser',
-    //         'items.packedUser',
-    //         'items.deliveredUser',
-    //         'items.packerVerifiedUser',
-    //         'assignedUser',
-    //         'deliveredUser',
-    //         'logs.user'
-    //     ])
-    //     ->where('status', 'picked')
-    //     ->whereHas('items', function ($q) use ($idStr) {
-    //         $q->where('picked_by', $idStr)
-    //           ->orWhere(function ($sub) use ($idStr) {
-    //               $sub->where('assigned_to', $idStr)
-    //                   ->where('status', 'picked');
-    //           });
-    //     })
-    //     ->orderBy('updated_at', 'desc')
-    //     ->get();
-
-    //     $formattedOrders = $completedOrders->map(fn($order) => $this->formatOrderDetails($order, 'picked'))
-    //         ->filter(fn($ord) => count($ord['items']) > 0)
-    //         ->values();
-
-    //     return response()->json([
-    //         'success' => true,
-    //         'data' => $formattedOrders,
-    //     ]);
-    // }
+ 
     public function apiOrdersComplete(Request $request, $id)
     {
         $idStr = trim((string) $id);
@@ -1130,25 +361,24 @@ class PickerManagementController extends Controller
         |--------------------------------------------------------------------------
         */
         $orders = Order::with([
-            'items.assignedUser',
-            'items.pickedUser',
-            'items.packedUser',
-            'items.deliveredUser',
-            'items.packerVerifiedUser',
-            'assignedUser',
-            'deliveredUser',
-        ])
-        ->where('status', 'picked')
-        ->whereHas('items', function ($q) use ($idStr) {
-            $q->where('picked_by', $idStr)
-                ->orWhere(function ($sub) use ($idStr) {
-                    $sub->where('assigned_to', $idStr)
-                        ->where('status', 'picked');
-                });
-        })
-        ->orderBy('updated_at', 'desc')
-        ->paginate($perPage);
-
+                'items.assignedUser',
+                'items.pickedUser',
+                'items.packedUser',
+                'items.deliveredUser',
+                'items.packerVerifiedUser',
+                'assignedUser',
+                'deliveredUser',
+            ])
+            ->whereIn('status', ['picked', 'partialy_picked'])
+            ->whereHas('items', function ($q) use ($idStr) {
+                $q->where('picked_by', $idStr)
+                    ->orWhere(function ($sub) use ($idStr) {
+                        $sub->where('assigned_to', $idStr)
+                            ->whereIn('status', ['picked', 'packed', 'delivered']);
+                    });
+            })
+            ->orderBy('updated_at', 'desc')
+            ->paginate($perPage);
         /*
         |--------------------------------------------------------------------------
         | Format orders
@@ -2658,6 +1888,7 @@ class PickerManagementController extends Controller
      * Update individual item status (picked, packed, delivered) with user log
      * Route: POST /api/orders/items/update-status
      */
+
     public function updateItemStatus(Request $request)
     {
         $validator = Validator::make($request->all(), [
@@ -2679,27 +1910,46 @@ class PickerManagementController extends Controller
         }
 
         return DB::transaction(function () use ($request) {
+
+            // 1. Find the order item.
             $query = OrderItem::query();
 
             if ($request->filled('order_item_id')) {
                 $query->where('id', $request->input('order_item_id'));
+
             } elseif ($request->filled('line_item_id')) {
                 $query->where('line_item_id', $request->input('line_item_id'));
+
             } elseif ($request->filled('order_id')) {
                 $query->where('order_id', $request->input('order_id'));
+
                 if ($request->filled('barcode')) {
-                    $query->where(function ($q) use ($request) {
-                        $q->where('barcode', $request->input('barcode'))
-                          ->orWhere('product_code', $request->input('barcode'))
-                          ->orWhere('line_item_id', $request->input('barcode'));
+                    $barcode = $request->input('barcode');
+
+                    $query->where(function ($q) use ($barcode) {
+                        $q->where('barcode', $barcode)
+                            ->orWhere('product_code', $barcode)
+                            ->orWhere('line_item_id', $barcode);
                     });
+
                 } elseif ($request->filled('product_code')) {
-                    $query->where('product_code', $request->input('product_code'));
+                    $query->where(
+                        'product_code',
+                        $request->input('product_code')
+                    );
                 }
+
             } elseif ($request->filled('barcode')) {
-                $query->where('barcode', $request->input('barcode'))
-                      ->orWhere('product_code', $request->input('barcode'))
-                      ->orWhere('line_item_id', $request->input('barcode'));
+                $barcode = $request->input('barcode');
+
+                $query->where(function ($q) use ($barcode) {
+                    $q->where('barcode', $barcode)
+                        ->orWhere('product_code', $barcode)
+                        ->orWhere('line_item_id', $barcode);
+                });
+
+            } elseif ($request->filled('product_code')) {
+                $query->where('product_code', $request->input('product_code'));
             }
 
             $orderItem = $query->first();
@@ -2711,6 +1961,7 @@ class PickerManagementController extends Controller
                 ], 404);
             }
 
+            // 2. Ensure the item is assigned to a picker.
             if (!$orderItem->assigned_to) {
                 return response()->json([
                     'success' => false,
@@ -2718,30 +1969,49 @@ class PickerManagementController extends Controller
                 ], 400);
             }
 
+            // 3. Determine user details.
+            $user = Auth::user();
+
+            $userId = $user
+                ? $user->id
+                : $request->input('user_id');
+
+            $dbUser = $userId
+                ? \App\Models\User::find($userId)
+                : null;
+
+            $validUserId = $dbUser ? $dbUser->id : null;
+
+            $userName = $user
+                ? $user->name
+                : ($dbUser
+                    ? $dbUser->name
+                    : ($request->input('user_name') ?? 'System User'));
+
+            // 4. Update item status and corresponding timestamps.
             $oldStatus = $orderItem->status;
             $newStatus = $request->input('status');
-
-            $user = Auth::user();
-            $userId = $user ? $user->id : $request->input('user_id');
-            $dbUser = $userId ? \App\Models\User::find($userId) : null;
-            $validUserId = $dbUser ? $dbUser->id : null;
-            $userName = $user ? $user->name : ($dbUser ? $dbUser->name : ($request->input('user_name') ?? 'System User'));
 
             if ($newStatus === 'picked') {
                 $orderItem->picked_by = $validUserId;
                 $orderItem->picked_user_name = $userName;
+
                 if (!$orderItem->picked_at) {
                     $orderItem->picked_at = now();
                 }
+
             } elseif ($newStatus === 'packed') {
                 $orderItem->packed_by = $validUserId;
                 $orderItem->packed_user_name = $userName;
+
                 if (!$orderItem->packed_at) {
                     $orderItem->packed_at = now();
                 }
+
             } elseif ($newStatus === 'delivered') {
                 $orderItem->delivered_by = $validUserId;
                 $orderItem->delivered_user_name = $userName;
+
                 if (!$orderItem->delivered_at) {
                     $orderItem->delivered_at = now();
                 }
@@ -2750,6 +2020,7 @@ class PickerManagementController extends Controller
             $orderItem->status = $newStatus;
             $orderItem->save();
 
+            // 5. Log the item status change.
             $log = OrderStatusLog::create([
                 'order_id' => $orderItem->order_id,
                 'order_item_id' => $orderItem->id,
@@ -2758,25 +2029,253 @@ class PickerManagementController extends Controller
                 'action' => 'item_status_updated',
                 'old_status' => $oldStatus,
                 'new_status' => $newStatus,
-                'notes' => $request->input('notes', "Updated item status for {$orderItem->product_name}"),
+                'notes' => $request->input(
+                    'notes',
+                    "Updated item status for {$orderItem->product_name}"
+                ),
             ]);
 
-            $order = Order::with('items')->find($orderItem->order_id);
-            $allStatuses = $order->items->pluck('status');
+            // 6. Load all order items and their installation relationship.
+            $order = Order::with(['items.installation'])
+                ->find($orderItem->order_id);
 
-            $newOrderStatus = $order->status;
-            if ($allStatuses->every(fn($s) => $s === 'delivered')) {
+            if (!$order) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Order not found for the selected item.',
+                ], 404);
+            }
+
+            $allItems = $order->items;
+
+            // Helper for boolean database fields.
+            $truthy = static function ($value): bool {
+                return in_array(
+                    strtolower(trim((string) $value)),
+                    ['1', 'true', 'yes'],
+                    true
+                );
+            };
+
+            // 7. Identify installation items.
+            $isInstallationItem = function ($item) use ($truthy): bool {
+                $attributes = $item->getAttributes();
+
+                if (
+                    $truthy($attributes['is_installable'] ?? false) ||
+                    $truthy($attributes['is_installation'] ?? false) ||
+                    $truthy($attributes['installation_required'] ?? false)
+                ) {
+                    return true;
+                }
+
+                if (
+                    $item->relationLoaded('installation') &&
+                    $item->installation
+                ) {
+                    return true;
+                }
+
+                foreach ([
+                    'product_name',
+                    'product_code',
+                    'barcode',
+                    'product_tags',
+                    'tags',
+                    'product_type',
+                    'item_type',
+                    'category',
+                    'type',
+                ] as $field) {
+                    if (
+                        isset($attributes[$field]) &&
+                        preg_match(
+                            '/\binstallations?\b/i',
+                            (string) $attributes[$field]
+                        )
+                    ) {
+                        return true;
+                    }
+                }
+
+                return false;
+            };
+
+            // 8. Identify VS items by the exact VS tag.
+            $isVsItem = function ($item) use ($truthy): bool {
+                $attributes = $item->getAttributes();
+
+                if ($truthy($attributes['is_virtual_stock'] ?? false)) {
+                    return true;
+                }
+
+                foreach (['product_tags', 'tags'] as $field) {
+                    if (!isset($attributes[$field])) {
+                        continue;
+                    }
+
+                    $tags = $attributes[$field];
+
+                    if (is_string($tags)) {
+                        $decoded = json_decode($tags, true);
+
+                        $tags = is_array($decoded)
+                            ? $decoded
+                            : explode(',', $tags);
+                    }
+
+                    if (is_array($tags)) {
+                        foreach ($tags as $tag) {
+                            if (
+                                is_string($tag) &&
+                                strcasecmp(trim($tag), 'VS') === 0
+                            ) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+
+                // Fallback for explicit Virtual Stock descriptions.
+                foreach ([
+                    'product_name',
+                    'product_code',
+                    'barcode',
+                    'product_type',
+                    'item_type',
+                    'category',
+                    'type',
+                ] as $field) {
+                    if (
+                        isset($attributes[$field]) &&
+                        preg_match(
+                            '/\bvirtual[\s_-]*stock\b/i',
+                            (string) $attributes[$field]
+                        )
+                    ) {
+                        return true;
+                    }
+                }
+
+                return false;
+            };
+
+            // 9. Separate regular, VS, and installation items.
+            $installationItems = $allItems->filter(
+                fn ($item) => $isInstallationItem($item)
+            );
+
+            $vsItems = $allItems->reject(
+                fn ($item) => $isInstallationItem($item)
+            )->filter(
+                fn ($item) => $isVsItem($item)
+            );
+
+            $specialItemIds = $installationItems
+                ->merge($vsItems)
+                ->pluck('id')
+                ->unique();
+
+            $regularItems = $allItems->reject(
+                fn ($item) => $specialItemIds->contains($item->id)
+            );
+
+            // Statuses that mean an item has completed the picking stage.
+            $pickedStageStatuses = [
+                'picked',
+                'packed',
+                'delivered',
+            ];
+
+            // 10. Check whether all regular items have been picked.
+            $allRegularPicked = $regularItems->isNotEmpty()
+                && $regularItems->every(function ($item) use (
+                    $pickedStageStatuses
+                ) {
+                    return in_array(
+                        strtolower(trim((string) $item->status)),
+                        $pickedStageStatuses,
+                        true
+                    );
+                });
+
+            // 11. Check whether any VS or installation item is unfinished.
+            $unfinishedSpecialItems = $allItems
+                ->filter(
+                    fn ($item) => $specialItemIds->contains($item->id)
+                )
+                ->filter(function ($item) use ($pickedStageStatuses) {
+                    return !in_array(
+                        strtolower(trim((string) $item->status)),
+                        $pickedStageStatuses,
+                        true
+                    );
+                });
+
+            $hasUnfinishedSpecialItems = $unfinishedSpecialItems->isNotEmpty();
+
+            $allStatuses = $allItems->pluck('status');
+
+            $oldOrderStatus = $order->status;
+            $newOrderStatus = $oldOrderStatus;
+
+            // 12. Calculate the overall order status.
+            if (
+                $allItems->isNotEmpty() &&
+                $allStatuses->every(
+                    fn ($status) => strtolower(trim((string) $status))
+                        === 'delivered'
+                )
+            ) {
+                // Every item, including VS and installation, is delivered.
                 $newOrderStatus = 'delivered';
-            } elseif ($allStatuses->every(fn($s) => in_array($s, ['packed', 'delivered']))) {
+
+            } elseif (
+                $allRegularPicked &&
+                $hasUnfinishedSpecialItems
+            ) {
+                // All regular items are picked, but VS or installation
+                // items are still pending.
+                $newOrderStatus = 'partialy_picked';
+
+            } elseif (
+                $allItems->isNotEmpty() &&
+                $allStatuses->every(
+                    fn ($status) => in_array(
+                        strtolower(trim((string) $status)),
+                        ['packed', 'delivered'],
+                        true
+                    )
+                )
+            ) {
                 $newOrderStatus = 'packed';
-            } elseif ($allStatuses->every(fn($s) => in_array($s, ['picked', 'packed', 'delivered']))) {
+
+            } elseif (
+                $allItems->isNotEmpty() &&
+                $allStatuses->every(
+                    fn ($status) => in_array(
+                        strtolower(trim((string) $status)),
+                        $pickedStageStatuses,
+                        true
+                    )
+                )
+            ) {
                 $newOrderStatus = 'picked';
-            } elseif ($allStatuses->contains(fn($s) => in_array($s, ['picked', 'packed', 'delivered']))) {
+
+            } elseif (
+                $allStatuses->contains(
+                    fn ($status) => in_array(
+                        strtolower(trim((string) $status)),
+                        $pickedStageStatuses,
+                        true
+                    )
+                )
+            ) {
                 $newOrderStatus = 'picking';
             }
 
-            if ($newOrderStatus !== $order->status) {
-                $oldOrderStatus = $order->status;
+            // 13. Save order status and log the change.
+            if ($newOrderStatus !== $oldOrderStatus) {
                 $order->status = $newOrderStatus;
 
                 if ($newOrderStatus === 'delivered') {
@@ -2798,6 +2297,7 @@ class PickerManagementController extends Controller
                 ]);
             }
 
+            // 14. Return the updated item, order, and item status log.
             return response()->json([
                 'success' => true,
                 'message' => "Order item status updated from '{$oldStatus}' to '{$newStatus}'.",
@@ -2809,6 +2309,7 @@ class PickerManagementController extends Controller
             ]);
         });
     }
+
 
     /**
      * Helper method to format order & items details consistently for response
@@ -2964,6 +2465,7 @@ class PickerManagementController extends Controller
             'created_at' => $order->created_at ? $order->created_at->toIso8601String() : null,
         ];
     }
+
     public function pickerupdateItemStatus(Request $request)
     {
         $validator = Validator::make($request->all(), [
@@ -2986,13 +2488,13 @@ class PickerManagementController extends Controller
 
         return DB::transaction(function () use ($request) {
 
-            $query = OrderItem::query();
-
             /*
             |--------------------------------------------------------------------------
             | Find Order Item
             |--------------------------------------------------------------------------
             */
+            $query = OrderItem::query();
+
             if ($request->filled('order_item_id')) {
 
                 $query->where('id', $request->input('order_item_id'));
@@ -3006,11 +2508,8 @@ class PickerManagementController extends Controller
                 $query->where('order_id', $request->input('order_id'));
 
                 if ($request->filled('barcode')) {
-
                     $query->where('barcode', $request->input('barcode'));
-
                 } elseif ($request->filled('product_code')) {
-
                     $query->where('product_code', $request->input('product_code'));
                 }
 
@@ -3039,12 +2538,7 @@ class PickerManagementController extends Controller
 
             /*
             |--------------------------------------------------------------------------
-            | BARCODE VERIFICATION FOR PICKER
-            |--------------------------------------------------------------------------
-            |
-            | When picker changes status to "picked", barcode MUST be provided.
-            | The scanned barcode must exactly match the item's stored barcode.
-            |
+            | Barcode Verification For Picker
             |--------------------------------------------------------------------------
             */
             if ($request->input('status') === 'picked') {
@@ -3068,9 +2562,6 @@ class PickerManagementController extends Controller
                     ], 400);
                 }
 
-                /*
-                 * Exact barcode comparison.
-                 */
                 if ($scannedBarcode !== $itemBarcode) {
                     return response()->json([
                         'success' => false,
@@ -3188,33 +2679,116 @@ class PickerManagementController extends Controller
             */
             $order = Order::with('items')->find($orderItem->order_id);
 
-            $allStatuses = $order->items->pluck('status');
+            if (!$order) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Order not found.',
+                ], 404);
+            }
+
+            $items = $order->items;
+
+            $completedPickingStatuses = [
+                'picked',
+                'packed',
+                'delivered',
+            ];
+
+            /*
+            |--------------------------------------------------------------------------
+            | Identify VS And Installation Items
+            |--------------------------------------------------------------------------
+            */
+            $isSpecialItem = function ($item) {
+
+                $tags = collect(explode(',', $item->product_tags ?? ''))
+                    ->map(fn ($tag) => trim($tag));
+
+                $isVs = $tags->contains(
+                    fn ($tag) => strcasecmp($tag, 'VS') === 0
+                );
+
+                $isInstallation = (bool) ($item->is_installable ?? false);
+
+                return $isVs || $isInstallation;
+            };
+
+            $regularItems = $items->filter(
+                fn ($item) => !$isSpecialItem($item)
+            );
+
+            $specialItems = $items->filter(
+                fn ($item) => $isSpecialItem($item)
+            );
+
+            $allStatuses = $items->pluck('status');
 
             $newOrderStatus = $order->status;
 
-            if ($allStatuses->every(fn($s) => $s === 'delivered')) {
+            /*
+            |--------------------------------------------------------------------------
+            | Determine Overall Order Status
+            |--------------------------------------------------------------------------
+            */
+
+            // All items delivered.
+            if (
+                $allStatuses->isNotEmpty()
+                && $allStatuses->every(fn ($status) => $status === 'delivered')
+            ) {
 
                 $newOrderStatus = 'delivered';
 
+            // All items are packed or delivered, and at least one is packed.
             } elseif (
-                $allStatuses->every(
-                    fn($s) => in_array($s, ['packed', 'delivered'])
+                $allStatuses->isNotEmpty()
+                && $allStatuses->every(
+                    fn ($status) => in_array($status, ['packed', 'delivered'])
                 )
             ) {
 
                 $newOrderStatus = 'packed';
 
+            // All regular items are picked, but at least one VS or
+            // installation item is still not picked.
             } elseif (
-                $allStatuses->every(
-                    fn($s) => in_array($s, ['picked', 'packed', 'delivered'])
+                $regularItems->isNotEmpty()
+                && $regularItems->every(
+                    fn ($item) => in_array(
+                        $item->status,
+                        $completedPickingStatuses
+                    )
+                )
+                && $specialItems->contains(
+                    fn ($item) => !in_array(
+                        $item->status,
+                        $completedPickingStatuses
+                    )
+                )
+            ) {
+
+                $newOrderStatus = 'partialy_picked';
+
+            // All items have been picked, packed, or delivered.
+            } elseif (
+                $allStatuses->isNotEmpty()
+                && $allStatuses->every(
+                    fn ($status) => in_array(
+                        $status,
+                        $completedPickingStatuses
+                    )
                 )
             ) {
 
                 $newOrderStatus = 'picked';
 
+            // At least one item has progressed, but other items remain.
             } elseif (
                 $allStatuses->contains(
-                    fn($s) => in_array($s, ['picked', 'packed', 'delivered'])
+                    fn ($status) => in_array(
+                        $status,
+                        $completedPickingStatuses
+                    )
                 )
             ) {
 
@@ -3233,7 +2807,6 @@ class PickerManagementController extends Controller
                 $order->status = $newOrderStatus;
 
                 if ($newOrderStatus === 'delivered') {
-
                     $order->delivered_by = $validUserId;
                     $order->delivered_user_name = $userName;
                     $order->delivered_at = now();
@@ -3268,4 +2841,5 @@ class PickerManagementController extends Controller
             ]);
         });
     }
+
 }

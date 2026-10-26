@@ -166,17 +166,17 @@ class PickerAdminController extends Controller
             ], 500);
         }
     }
+
     public function unassignItemsByPicker(Request $request)
     {
         try {
-
             $validated = $request->validate([
                 'order_line_item_id' => 'required|exists:order_items,line_item_id',
             ]);
 
             DB::beginTransaction();
 
-            $order_line_item_id = $validated['order_line_item_id'];
+            $orderLineItemId = $validated['order_line_item_id'];
 
             /*
             |--------------------------------------------------------------------------
@@ -184,105 +184,106 @@ class PickerAdminController extends Controller
             |--------------------------------------------------------------------------
             */
 
-            $order_line_item = OrderItem::where(
+            $orderLineItem = OrderItem::where(
                 'line_item_id',
-                $order_line_item_id
+                $orderLineItemId
             )->firstOrFail();
 
             /*
             |--------------------------------------------------------------------------
-            | Get parent order ID BEFORE unassigning
+            | Get parent order ID before unassigning
             |--------------------------------------------------------------------------
             */
 
-            $order_id = $order_line_item->order_id;
+            $orderId = $orderLineItem->order_id;
 
             /*
             |--------------------------------------------------------------------------
-            | Unassign this item
+            | Unassign selected item
             |--------------------------------------------------------------------------
             */
 
-            $order_line_item->assigned_to = null;
-            $order_line_item->assigned_user_name = null;
-            $order_line_item->assigned_at = null;
-            $order_line_item->status = 'pending';
-
-            $order_line_item->save();
+            $orderLineItem->assigned_to = null;
+            $orderLineItem->assigned_user_name = null;
+            $orderLineItem->assigned_at = null;
+            $orderLineItem->status = 'pending';
+            $orderLineItem->save();
 
             /*
             |--------------------------------------------------------------------------
-            | Check all items belonging to this order
+            | Check whether any items remain assigned
             |--------------------------------------------------------------------------
             */
 
-            $all_order_items = OrderItem::where(
-                'order_id',
-                $order_id
-            )->get();
+            $allOrderItems = OrderItem::where('order_id', $orderId)->get();
 
-            /*
-            |--------------------------------------------------------------------------
-            | Check whether any item is still assigned
-            |--------------------------------------------------------------------------
-            */
-
-            $assigned_items = $all_order_items->filter(function ($item) {
-
-                return !empty($item->assigned_to);
-
+            $noItemsAssigned = $allOrderItems->every(function ($item) {
+                return empty($item->assigned_to);
             });
 
-            $no_items_assigned = $assigned_items->isEmpty();
-
             /*
             |--------------------------------------------------------------------------
-            | If this was the last assigned item,
-            | clear assignment from parent order
+            | Update parent order status to pending
             |--------------------------------------------------------------------------
             */
 
-            $order = Order::findOrFail($order_id);
+            $order = Order::findOrFail($orderId);
 
-            if ($no_items_assigned) {
+            $order->status = 'pending';
 
+            /*
+            |--------------------------------------------------------------------------
+            | Clear parent assignment only if no items remain assigned
+            |--------------------------------------------------------------------------
+            */
+
+            if ($noItemsAssigned) {
                 $order->assigned_to = null;
                 $order->assigned_user_name = null;
                 $order->assigned_at = null;
-                $order->status = 'pending';
-                $order->save();
             }
+
+            $order->save();
 
             DB::commit();
 
             return response()->json([
                 'status' => 'success',
-                'message' => $no_items_assigned
-                    ? 'Last assigned item unassigned. Order assignment cleared successfully.'
-                    : 'Item unassigned from picker successfully.',
-                'no_items_assigned' => $no_items_assigned,
-                'order_id' => $order_id,
-                'data' => $order_line_item
+                'message' => 'Item unassigned successfully. Order status updated to pending.',
+                'no_items_assigned' => $noItemsAssigned,
+                'order_id' => $orderId,
+                'order_status' => $order->status,
+                'data' => $orderLineItem->fresh(),
             ], 200);
 
         } catch (\Illuminate\Validation\ValidationException $e) {
+            if (DB::transactionLevel() > 0) {
+                DB::rollBack();
+            }
 
             return response()->json([
                 'status' => 'error',
                 'message' => 'Validation failed',
-                'errors' => $e->errors()
+                'errors' => $e->errors(),
             ], 422);
 
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
+            if (DB::transactionLevel() > 0) {
+                DB::rollBack();
+            }
 
-            DB::rollBack();
+            \Log::error('unassignItemsByPicker failed', [
+                'message' => $e->getMessage(),
+                'order_line_item_id' => $request->input('order_line_item_id'),
+            ]);
 
             return response()->json([
                 'status' => 'error',
-                'message' => 'Failed to unassign items from picker: ' . $e->getMessage()
+                'message' => 'Failed to unassign item from picker: ' . $e->getMessage(),
             ], 500);
         }
     }
+
     public function assignOrderWithItems(Request $request)
     {
         try {

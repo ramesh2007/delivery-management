@@ -104,6 +104,14 @@ class OrderItem extends Model
     }
 
     /**
+     * Get flag images associated with this order item.
+     */
+    public function flagImages(): HasMany
+    {
+        return $this->hasMany(FlagImage::class, 'order_item_id')->orderBy('created_at', 'desc');
+    }
+
+    /**
      * Get the order that owns this item.
      */
     public function order(): BelongsTo

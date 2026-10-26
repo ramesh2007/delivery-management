@@ -149,11 +149,11 @@ class Order extends Model
     }
 
     /**
-     * Get flag discrepancy images reported for items in this order.
+     * Get return and replacement records for this order.
      */
-    public function flagImages(): HasMany
+    public function returnReplacements(): HasMany
     {
-        return $this->hasMany(FlagImage::class, 'order_id')->orderBy('created_at', 'desc');
+        return $this->hasMany(OrderReturnReplacement::class, 'order_id')->orderBy('created_at', 'desc');
     }
 
     /**

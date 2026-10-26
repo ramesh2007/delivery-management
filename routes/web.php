@@ -26,3 +26,10 @@ Route::post('/webhooks/shopify/orders', [ShopifyController::class, 'handleOrderW
 Route::post('/webhooks/shopify/orders-create', [ShopifyController::class, 'handleOrderWebhook']);
 Route::post('/webhooks/shopify', [ShopifyController::class, 'handleOrderWebhook']);
 
+// Legal Pages: Privacy Policy & Terms and Conditions
+Route::view('/privacy-policy', 'privacy-policy')->name('privacy.policy');
+Route::view('/terms-condition', 'terms-conditions');
+
+
+
+

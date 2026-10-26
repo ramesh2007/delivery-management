@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class OrderItemDiscrepancy extends Model
 {
@@ -45,5 +46,13 @@ class OrderItemDiscrepancy extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class, 'user_id');
+    }
+
+    /**
+     * Get flag images associated with this discrepancy.
+     */
+    public function flagImages(): HasMany
+    {
+        return $this->hasMany(FlagImage::class, 'discrepancy_id')->orderBy('created_at', 'desc');
     }
 }

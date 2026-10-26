@@ -5,9 +5,13 @@ namespace App\Http\Controllers\Api\Admin;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\Order;
+use App\Models\OrderStatusLog;
+use App\Models\OrderItemDiscrepancy;
+use App\Models\FlagImage;
 use App\Services\ShopifyService;
 use App\Services\OrderDetailsService;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 
 class OrderStatusApiController extends Controller
 {
@@ -172,8 +176,8 @@ class OrderStatusApiController extends Controller
     public function newOrders(Request $request)
     {
         $this->handleSilentSync($request);
-
-        $perPage = max(1, min((int) $request->query('per_page', 15), 100));
+        $perPage = 15;
+        // $perPage = max(1, min((int) $request->query('per_page', 15), 100));
         $search = trim((string) $request->query('search', ''));
 
         $query = Order::with(['payment', 'items'])
@@ -314,9 +318,6 @@ class OrderStatusApiController extends Controller
             })
             ->whereNull('delivered_by')
             ->whereDoesntHave('driverAssignment')
-            ->whereDoesntHave('items', function ($iq) {
-                $iq->where('status', '!=', 'packed');
-            })
             ->orderBy('updated_at', 'desc')
             ->orderBy('created_at', 'desc')
             ->paginate($perPage);
@@ -396,10 +397,41 @@ class OrderStatusApiController extends Controller
 
         $paginator = $this->getBaseOrderQuery($request)
             ->where(function ($q) {
-                $q->whereIn('status', ['assigned_to_driver', 'out_for_delivery', 'in_delivery', 'driver_accepted', 'started'])
-                  ->orWhereHas('driverAssignment');
+                $q->whereIn('status', [
+                    'assigned_to_driver',
+                    'partial_assigned_driver',
+                    'out_for_delivery',
+                    'in_delivery',
+                    'driver_accepted',
+                    'started',
+                    'partialy_deliverd',
+                    'partially_delivered',
+                    'partial_delivered',
+                ])
+                ->orWhere(function ($sub) {
+                    $sub->whereNotIn('status', [
+                        'pending',
+                        'new',
+                        'unfulfilled',
+                        'picking',
+                        'picked',
+                        'partialy_picked',
+                        'partially_picked',
+                        'packing',
+                        'packed',
+                        'partial_packed',
+                        'ready_to_assign',
+                        'cancelled',
+                        'cancelled_delivery',
+                        'delivered',
+                        'completed',
+                        'flagged',
+                        'delivery_failed',
+                    ])
+                    ->whereHas('driverAssignment');
+                });
             })
-            ->where('status', '!=', 'delivered')
+            ->whereNotIn('status', ['delivered', 'cancelled', 'cancelled_delivery', 'pending', 'flagged'])
             ->orderBy('updated_at', 'desc')
             ->paginate($perPage);
 
@@ -527,7 +559,8 @@ class OrderStatusApiController extends Controller
                                 ->orWhere('order_status', 'delivered');
                         });
                     });
-            });
+            })
+            ->whereNotIn('status', ['partialy_deliverd', 'partially_delivered', 'partial_delivered']);
     
         /*
         |--------------------------------------------------------------------------
@@ -1163,6 +1196,210 @@ class OrderStatusApiController extends Controller
                 ], 404);
             }
 
+            // Query optimization: Check if ANY line item in the order is flagged.
+            // If no line items are flagged, avoid executing any database queries against flag_images table.
+            $hasFlagged = false;
+            $flaggedLineItemIds = [];
+            $flaggedOrderItemIds = [];
+
+            $lineItems = $result['data']['line_items'] ?? $result['data']['items'] ?? [];
+            if (!empty($lineItems) && is_array($lineItems)) {
+                foreach ($lineItems as $item) {
+                    $isFlagged = !empty($item['is_flagged']) && ($item['is_flagged'] === true || $item['is_flagged'] === 1 || $item['is_flagged'] === '1' || $item['is_flagged'] === 'true');
+                    if ($isFlagged) {
+                        $hasFlagged = true;
+                        if (!empty($item['line_item_id'])) {
+                            $flaggedLineItemIds[] = (string)$item['line_item_id'];
+                        }
+                        if (!empty($item['id'])) {
+                            $flaggedLineItemIds[] = (string)$item['id'];
+                        }
+                        if (!empty($item['item_id'])) {
+                            $flaggedOrderItemIds[] = (int)$item['item_id'];
+                        }
+                    }
+                }
+            }
+
+            // Base URL resolution for discrepancies storage (from .env or default production domain)
+            $configuredBase = env('FLAG_IMAGES_BASE_URL', env('PUBLIC_BASE_URL'));
+            if (!$configuredBase) {
+                $appUrl = config('app.url', 'http://localhost');
+                if (!empty($appUrl) && !str_contains($appUrl, 'localhost') && !str_contains($appUrl, '127.0.0.1')) {
+                    $configuredBase = rtrim($appUrl, '/') . '/public';
+                } else {
+                    $configuredBase = 'https://delivery-management.hmws.qatar123.com/public';
+                }
+            }
+            $storageBaseUrl = rtrim($configuredBase, '/');
+
+            $formatImageUrl = function (?string $rawUrl) use ($storageBaseUrl): ?string {
+                if (empty($rawUrl)) {
+                    return null;
+                }
+                $rawUrl = trim($rawUrl);
+
+                if (str_starts_with($rawUrl, $storageBaseUrl)) {
+                    return $rawUrl;
+                }
+
+                // Extract /storage/... path if present in URL
+                if (preg_match('#(?:https?://[^/]+)?(?:/public)?(/storage/.+)$#i', $rawUrl, $matches)) {
+                    return $storageBaseUrl . $matches[1];
+                }
+
+                // Extract storage/...
+                if (preg_match('#^/?storage/(.+)$#i', $rawUrl, $matches)) {
+                    return $storageBaseUrl . '/storage/' . $matches[1];
+                }
+
+                // Extract discrepancies/...
+                if (preg_match('#^/?discrepancies/(.+)$#i', $rawUrl, $matches)) {
+                    return $storageBaseUrl . '/storage/discrepancies/' . $matches[1];
+                }
+
+                // Any localhost/127.0.0.1 path
+                if (preg_match('#^https?://(?:localhost|127\.0\.0\.1)(?::\d+)?(?:/public)?(/.*)$#i', $rawUrl, $matches)) {
+                    return $storageBaseUrl . $matches[1];
+                }
+
+                if (str_starts_with($rawUrl, '/')) {
+                    return $storageBaseUrl . $rawUrl;
+                }
+
+                return $rawUrl;
+            };
+
+            // Only query flag_images table when at least one line item is flagged
+            if ($hasFlagged) {
+                $flaggedLineItemIds = array_values(array_unique(array_filter($flaggedLineItemIds)));
+                $flaggedOrderItemIds = array_values(array_unique(array_filter($flaggedOrderItemIds)));
+
+                $orderDbId = $result['data']['order_id'] ?? null;
+                $orderDataId = $result['data']['id'] ?? null;
+                $orderNumber = $result['data']['order_number'] ?? ($result['data']['name'] ?? null);
+
+                $orderIds = array_values(array_unique(array_filter([
+                    $orderDbId,
+                    $orderDataId,
+                    is_numeric($id) ? (int)$id : null,
+                ])));
+
+                $orderNumbers = array_values(array_unique(array_filter([
+                    $orderNumber,
+                    $orderNumber ? ltrim((string)$orderNumber, '#') : null,
+                    $orderNumber ? '#' . ltrim((string)$orderNumber, '#') : null,
+                    (string)$id,
+                    ltrim((string)$id, '#'),
+                    '#' . ltrim((string)$id, '#'),
+                ])));
+
+                // Highly optimized single query matching order_id/order_number and line_item_id
+                $flagImagesQuery = DB::table('flag_images')
+                    ->select([
+                        'id',
+                        'order_id',
+                        'order_number',
+                        'line_item_id',
+                        'order_item_id',
+                        'image_url',
+                        'photo_url',
+                    ])
+                    ->where(function ($q) use ($orderIds, $orderNumbers) {
+                        if (!empty($orderIds)) {
+                            $q->whereIn('order_id', $orderIds);
+                        }
+                        if (!empty($orderNumbers)) {
+                            $q->orWhereIn('order_number', $orderNumbers);
+                        }
+                    })
+                    ->where(function ($q) use ($flaggedLineItemIds, $flaggedOrderItemIds) {
+                        $q->whereIn('line_item_id', $flaggedLineItemIds);
+                        if (!empty($flaggedOrderItemIds)) {
+                            $q->orWhereIn('order_item_id', $flaggedOrderItemIds);
+                        }
+                    })
+                    ->orderBy('id', 'desc')
+                    ->get();
+
+                $imagesByLineItemId = [];
+                $imagesByOrderItemId = [];
+                foreach ($flagImagesQuery as $row) {
+                    $imgUrl = $row->image_url ?: $row->photo_url;
+                    if (empty($imgUrl)) {
+                        continue;
+                    }
+
+                    $formattedUrl = $formatImageUrl($imgUrl);
+
+                    if (!empty($row->line_item_id)) {
+                        $imagesByLineItemId[(string)$row->line_item_id][] = $formattedUrl;
+                    }
+                    if (!empty($row->order_item_id)) {
+                        $imagesByOrderItemId[(int)$row->order_item_id][] = $formattedUrl;
+                    }
+                }
+
+                $attachImages = function (array &$item) use ($imagesByLineItemId, $imagesByOrderItemId) {
+                    $isFlagged = !empty($item['is_flagged']) && ($item['is_flagged'] === true || $item['is_flagged'] === 1 || $item['is_flagged'] === '1' || $item['is_flagged'] === 'true');
+                    if (!$isFlagged) {
+                        $item['flag_image'] = null;
+                        return;
+                    }
+
+                    $lineKey1 = !empty($item['line_item_id']) ? (string)$item['line_item_id'] : null;
+                    $lineKey2 = !empty($item['id']) ? (string)$item['id'] : null;
+                    $orderItemKey = !empty($item['item_id']) ? (int)$item['item_id'] : null;
+
+                    $matchedUrl = null;
+                    if ($lineKey1 && !empty($imagesByLineItemId[$lineKey1])) {
+                        $matchedUrl = $imagesByLineItemId[$lineKey1][0];
+                    } elseif ($lineKey2 && $lineKey2 !== $lineKey1 && !empty($imagesByLineItemId[$lineKey2])) {
+                        $matchedUrl = $imagesByLineItemId[$lineKey2][0];
+                    } elseif ($orderItemKey && !empty($imagesByOrderItemId[$orderItemKey])) {
+                        $matchedUrl = $imagesByOrderItemId[$orderItemKey][0];
+                    }
+
+                    $item['flag_image'] = $matchedUrl;
+                };
+
+                if (isset($result['data']['line_items']) && is_array($result['data']['line_items'])) {
+                    foreach ($result['data']['line_items'] as &$lItem) {
+                        $attachImages($lItem);
+                    }
+                    unset($lItem);
+                }
+
+                if (isset($result['data']['items']) && is_array($result['data']['items'])) {
+                    foreach ($result['data']['items'] as &$lItem) {
+                        $attachImages($lItem);
+                    }
+                    unset($lItem);
+                }
+            } else {
+                // When false, attach null flag_image without any DB queries
+                $setEmptyImage = function (array &$item) {
+                    $item['flag_image'] = null;
+                };
+
+                if (isset($result['data']['line_items']) && is_array($result['data']['line_items'])) {
+                    foreach ($result['data']['line_items'] as &$lItem) {
+                        $setEmptyImage($lItem);
+                    }
+                    unset($lItem);
+                }
+
+                if (isset($result['data']['items']) && is_array($result['data']['items'])) {
+                    foreach ($result['data']['items'] as &$lItem) {
+                        $setEmptyImage($lItem);
+                    }
+                    unset($lItem);
+                }
+            }
+
+            // Remove order-level flag_images to keep response clean and compact
+            unset($result['data']['flag_images'], $result['data']['has_flag_images']);
+
             return response()->json([
                 'status' => true,
                 'data' => $result['data'],
@@ -1183,6 +1420,8 @@ class OrderStatusApiController extends Controller
             ], 500);
         }
     }
+
+ 
 
     /**
      * Helper method to format an Order model into unified Sales Order schema.

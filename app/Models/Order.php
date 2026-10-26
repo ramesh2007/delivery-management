@@ -149,6 +149,14 @@ class Order extends Model
     }
 
     /**
+     * Get flag discrepancy images reported for items in this order.
+     */
+    public function flagImages(): HasMany
+    {
+        return $this->hasMany(FlagImage::class, 'order_id')->orderBy('created_at', 'desc');
+    }
+
+    /**
      * Get the user/picker assigned to this order.
      */
     public function assignedUser(): BelongsTo

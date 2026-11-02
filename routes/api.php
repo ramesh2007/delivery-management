@@ -28,6 +28,11 @@ use App\Http\Controllers\Api\Mobile\DeliveryManagementController;
 use App\Http\Controllers\Api\Mobile\DiscrepancyController;
 use App\Http\Controllers\Api\Mobile\ScheduledInstallationMobileController;
 use App\Http\Controllers\Api\Mobile\DashboardController;
+use App\Http\Controllers\Api\Mobile\MainwareHousePickerManagementController;
+
+
+//customer care
+use App\Modules\CustomerCare\Controllers\HealthController;
 
 
 Route::post('/login', [AuthController::class, 'login']);
@@ -176,7 +181,11 @@ Route::prefix('mobile')->group(function(){
     Route::post('/orders/items/unassign-me', [PickerManagementController::class, 'unassignItems']);
     Route::any('/orders/items/update-status', [PickerManagementController::class, 'updateItemStatus']);
     Route::post('/orders/items/picker/update-status', [PickerManagementController::class, 'pickerupdateItemStatus']);
-
+     //MainwareHousePickerManagementController
+    Route::any('/installation-orders/picker',[MainwareHousePickerManagementController::class, 'installationOrdersPicker']);
+    Route::any('/mainware-house/picker/assign-installation-orders',[MainwareHousePickerManagementController::class, 'assignInstallationOrdersToPicker']);
+    Route::any('/mainware-house/picker/update-status',[MainwareHousePickerManagementController::class, 'updateStatus']);
+    Route::get('/mainware-house/picker/{id}',[MainwareHousePickerManagementController::class, 'getInstallationOrdersByPickerId']);
     // Assign and Unassign Picker with Order Items Array API Endpoints
     Route::post('/orders/assign-picker-items', [PickerManagementController::class, 'assignOrderWithItems']);
     Route::post('/orders/picker/assign-items', [PickerManagementController::class, 'assignOrderWithItems']);
@@ -228,7 +237,7 @@ Route::prefix('mobile')->group(function(){
     Route::post('/orders/driver/cancelled', [DeliveryManagementController::class, 'orderCancelled']);
     Route::post('/orders/driver/refund', [DeliveryManagementController::class, 'orderRefund']);
     Route::post('/orders/driver/exchange', [DeliveryManagementController::class, 'orderExchange']);
-    Route::post('/orders/driver/flag', [DeliveryManagementController::class, 'flagDelivery']);
+   // Route::post('/orders/driver/flag', [DeliveryManagementController::class, 'flagDelivery']);
     Route::post('/orders/driver/flag-delivery', [DeliveryManagementController::class, 'flagDelivery']);
     Route::get('/orders/driver/flagged/{driver_user_id?}', [DeliveryManagementController::class, 'getFlaggedOrders']);
     Route::get('/orders/driver/flagged-orders/{driver_user_id?}', [DeliveryManagementController::class, 'getFlaggedOrders']);

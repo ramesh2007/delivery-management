@@ -98,8 +98,8 @@ Route::prefix('admin')->group(function () {
     //Pickers 
     Route::get('/get-pickers-list', [PickerAdminController::class, 'getPickersList']);
     Route::any('/assign-items-by-picker', [PickerAdminController::class, 'assignItemsByPicker']);
-    Route::any('/orders/unassign-picker-items',[PickerAdminController::class,'unassignItemsByPicker']);
-    Route::any('/orders/assign-order-wise-picker',[PickerAdminController::class,'assignOrderWithItems']);
+    Route::any('/orders/unassign-picker-items', [PickerAdminController::class, 'unassignItemsByPicker']);
+    Route::any('/orders/assign-order-wise-picker', [PickerAdminController::class, 'assignOrderWithItems']);
     Route::post('/orders/order-wise-picker-unassign', [PickerAdminController::class, 'unassignOrderWithItems']);
 
     //Packers
@@ -160,9 +160,8 @@ Route::prefix('admin')->group(function () {
 
 });
 
-
 // Flutter App Order Management API Endpoints (Sync, Item Status update, Picker Assignment, User Logs)
-Route::prefix('mobile')->group(function(){
+Route::prefix('mobile')->group(function () {
     Route::post('/login', [AuthController::class, 'login']);
     //Picker apis.
     Route::get('/orders', [PickerManagementController::class, 'index']);
@@ -258,7 +257,6 @@ Route::prefix('mobile')->group(function(){
     Route::match(['get', 'post'], 'scheduled/completed/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getCompletedInstallationsByInstallerUserId']);
     Route::match(['get', 'post'], 'scheduled/update-status/{id?}', [ScheduledInstallationMobileController::class, 'updateStatus']);
     Route::match(['get', 'post'], 'scheduled/installed-proof-upload', [ScheduledInstallationMobileController::class, 'InstalledProofimageupload']);
-    Route::match(['get', 'post'], 'scheduled/installed-proof-upload', [ScheduledInstallationMobileController::class, 'InstalledProofimageupload']);
     //Mobile Dashboard Endpoints
     Route::match(['get', 'post'], '/picker/dashboard/{picker_id?}', [DashboardController::class, 'pickerDashboard']);
     Route::match(['get', 'post'], '/packer/dashboard/{packer_id?}', [DashboardController::class, 'packerDashboard']);
@@ -267,12 +265,20 @@ Route::prefix('mobile')->group(function(){
     //partially cancelled
     Route::match(['get', 'post'], 'driver/partially-cancelled', [DeliveryManagementController::class, 'PartiallyCancelledOrder']);
     Route::match(['get', 'post'], 'orders/driver/partially-cancelled', [DeliveryManagementController::class, 'PartiallyCancelledOrder']);
+
+    Route::match(['get', 'post'], 'scheduled/start-installation', [ScheduledInstallationMobileController::class, 'startInstallation']);
+    Route::match(['get', 'post'], 'scheduled/started/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getStartedInstallationList']);
+    Route::match(['get', 'post'], 'scheduled/flag-order', [ScheduledInstallationMobileController::class, 'flagInstallation']);
+    Route::match(['get', 'post'], 'scheduled/flagged/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getFlaggedInstallations']);
+    Route::match(['get', 'post'], 'scheduled/markas-delivered', [ScheduledInstallationMobileController::class, 'installationMarkasDelivered']);
+
 });
+
 
 
 //Mobile App Routes
 
-// Picker & Packer Management List Endpoints
+// Picker & Packer Management List Endpointss
 Route::get('/get-pickers-list', [PickerManagementController::class, 'getPickersList']);
 Route::get('/get-packers-list', [PackerManagementController::class, 'getPackersList']);
 

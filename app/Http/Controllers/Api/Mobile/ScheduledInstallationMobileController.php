@@ -7,7 +7,11 @@ use App\Http\Controllers\Api\Admin\InstallationLevelController;
 use App\Models\InstallationImage;
 use App\Models\Order;
 use App\Models\OrderItem;
+use App\Models\OrderItemDiscrepancy;
+use App\Models\FlagImage;
 use App\Models\OrderInstallation;
+use App\Models\OrderPayment;
+use App\Models\OrderDriverAssigned;
 use App\Models\OrderStatusLog;
 use App\Models\TechnicianScheduled;
 use App\Models\User;
@@ -76,8 +80,12 @@ class ScheduledInstallationMobileController extends Controller
             // 4. Query orders assigned to this installer
             $ordersQuery = Order::with([
                 'items.installation',
+                'items.installationImages',
                 'assignedUser',
                 'technicianSchedules',
+                'payment',
+                'installationImages',
+                'discrepancies',
                 'logs' => function ($q) {
                     $q->latest()->limit(10);
                 }
@@ -128,13 +136,27 @@ class ScheduledInstallationMobileController extends Controller
                 });
             }
 
-            // Optional status filter
+            // Optional status filter (default: remove already started and completed orders from main installation list)
             if (!empty($statusFilter)) {
-                $ordersQuery->where(function ($q) use ($statusFilter) {
-                    $q->where('status', $statusFilter)
-                        ->orWhereHas('items', function ($iq) use ($statusFilter) {
-                            $iq->where('is_installable', true)
-                                ->where('status', $statusFilter);
+                if ($statusFilter !== 'all') {
+                    $ordersQuery->where(function ($q) use ($statusFilter) {
+                        $q->where('status', $statusFilter)
+                            ->orWhereHas('items', function ($iq) use ($statusFilter) {
+                                $iq->where('is_installable', true)
+                                    ->where('status', $statusFilter);
+                            });
+                    });
+                }
+            } elseif (!filter_var($request->query('include_all', false), FILTER_VALIDATE_BOOLEAN) && !filter_var($request->query('all', false), FILTER_VALIDATE_BOOLEAN)) {
+                // By default, once an order is started or completed, remove it from the main installation list
+                $ordersQuery->whereNotIn('status', ['in_progress', 'started', 'stated', 'completed', 'installed']);
+                $ordersQuery->whereDoesntHave('items', function ($iq) {
+                    $iq->where('is_installable', true)
+                        ->where(function ($sub) {
+                            $sub->whereIn('status', ['in_progress', 'started', 'stated', 'completed', 'installed'])
+                                ->orWhereHas('installation', function ($instQ) {
+                                    $instQ->whereIn('status', ['in_progress', 'started', 'stated', 'completed', 'installed']);
+                                });
                         });
                 });
             }
@@ -161,8 +183,11 @@ class ScheduledInstallationMobileController extends Controller
 
             // 5. Format results into structured mobile payload
             $formattedOrders = $orders->map(function ($order) use ($idStr, $installerName, $request) {
-                // Map all items with complete installation and installable status (1 = yes, 0 = no)
-                $allFormattedItems = $order->items->map(function ($item) use ($idStr, $installerName, $order) {
+                // Map only installable items with complete installation
+                $installableItems = $order->items->filter(function ($item) {
+                    return (bool) ($item->is_installable ?? false);
+                });
+                $allFormattedItems = $installableItems->map(function ($item) use ($idStr, $installerName, $order) {
                     $installation = $item->installation;
                     $isInstallableBool = (bool) ($item->is_installable ?? false);
 
@@ -195,86 +220,69 @@ class ScheduledInstallationMobileController extends Controller
                         || (!empty($installerName) && $item->assigned_user_name === $installerName)
                         || (empty($item->assigned_to) && ((string) $order->assigned_to === $idStr || (!empty($installerName) && $order->assigned_user_name === $installerName)));
 
+                    $latestImg = $item->installationImages?->sortByDesc('id')->first()
+                        ?? InstallationImage::where('order_item_id', $item->id)->latest()->first()
+                        ?? ($order->installationImages?->sortByDesc('id')->first());
+
+                    $beforeImage = $latestImg?->before_install_image;
+                    $afterImage = $latestImg?->after_install_image;
+
+                    $instImages = is_array($installation?->images)
+                        ? $installation->images
+                        : (json_decode($installation?->images ?? '[]', true) ?: []);
+
+                    if (!$beforeImage && !empty($instImages[0])) {
+                        $beforeImage = $instImages[0];
+                    }
+                    if (!$afterImage && !empty($instImages[1])) {
+                        $afterImage = $instImages[1];
+                    }
+
+                    $unitPrice = (float) $item->unit_price;
+                    $qty = (int) $item->quantity;
+                    $sku = $item->product_code ?: ($item->barcode ?: "SKU-{$item->id}");
+
+                    $isInstalled = !empty($afterImage) || in_array($installation?->status, ['completed', 'installed']);
+
                     $installationPayload = $installation ? [
                         'id' => $installation->id,
                         'order_item_id' => $installation->order_item_id,
                         'installation_type' => $installation->installation_type,
                         'installation_level' => $installation->installation_level,
-                        'status' => $installation->status ?? ($item->status ?? 'scheduled'),
+                        'status' => $isInstalled ? 'installed' : ($installation->status ?? ($item->status ?? 'scheduled')),
                         'notes' => $installation->notes ?? null,
-                        'images' => is_array($installation->images) ? $installation->images : (json_decode($installation->images ?? '[]', true) ?: []),
                         'completed_at' => $installation->completed_at?->toIso8601String(),
                         'is_scheduled_assigned' => (bool) $installation->is_scheduled_assigned,
                         'created_at' => $installation->created_at?->toIso8601String(),
                         'updated_at' => $installation->updated_at?->toIso8601String(),
                     ] : null;
 
-                    return [
+                    $itemData = [
                         'id' => $item->id,
-                        'order_item_id' => $item->id,
                         'order_id' => $item->order_id,
                         'line_item_id' => $item->line_item_id,
-                        'product_id' => $item->product_id,
-                        'product_code' => $item->product_code,
-                        'barcode' => $item->barcode,
                         'product_name' => $item->product_name,
+                        'sku' => $sku,
+                        'barcode' => $item->barcode,
                         'image' => $item->image,
-                        'quantity' => (int) $item->quantity,
-                        'unit_price' => (float) $item->unit_price,
-                        'status' => $item->status,
-                        'is_installable' => $isInstallableBool ? 1 : 0,
-                        'is_installable_bool' => $isInstallableBool,
-                        'is_installable_label' => $isInstallableBool ? 'yes' : 'no',
-                        'is_assigned_to_me' => $isAssignedToThisInstaller,
-                        'assigned_installer_id' => $itemInstallerId,
-                        'assigned_installer_name' => $itemInstallerName,
-                        'installer_id' => $itemInstallerId,
-                        'installer_name' => $itemInstallerName,
-                        'installer_user_id' => $itemInstallerId,
-                        'product_tags' => $item->product_tags ?? null,
-                        'gift_wrap' => $item->gift_wrap ?? null,
-                        'installer' => [
-                            'id' => $itemInstallerId,
-                            'name' => $itemInstallerName,
+                        'quantity' => $qty,
+                        'unit_price' => $unitPrice,
+                        'total_price' => (float) ($unitPrice * $qty),
+                        'currency' => 'QAR',
+                        'status' => $isInstalled ? 'installed' : $item->status,
+                        'installation_proof_photos' => [
+                            'before_install_image' => $beforeImage,
+                            'after_install_image' => $afterImage,
                         ],
-                        'assigned_to' => $itemInstallerId,
-                        'assigned_user_name' => $itemInstallerName,
-                        'assigned_at' => $item->assigned_at?->toIso8601String() ?? $order->assigned_at?->toIso8601String(),
-                        'installation' => $installationPayload,
-                        'order_installation' => $installationPayload,
-                        'is_scheduled' => in_array($item->status, ['scheduled', 'scheduled_installation', 'installation', 'in_progress', 'started'])
-                            || in_array($installation?->status, ['scheduled', 'in_progress', 'started'])
-                            || (bool) ($installation?->is_scheduled_assigned ?? false),
+                        'is_installed' => $isInstalled,
                     ];
-                })->values();
 
-                // Installation items specifically (is_installable = 1)
-                $installationItems = $allFormattedItems->filter(function ($it) {
-                    return $it['is_installable'] === 1;
-                })->values();
+                    if ($installationPayload !== null) {
+                        $itemData['installation'] = $installationPayload;
+                    }
 
-                // Order installations list from order_installations table
-                $orderInstallations = $order->items
-                    ->map(function ($it) {
-                        return $it->installation;
-                    })
-                    ->filter()
-                    ->map(function ($inst) {
-                        return [
-                            'id' => $inst->id,
-                            'order_item_id' => $inst->order_item_id,
-                            'installation_type' => $inst->installation_type,
-                            'installation_level' => $inst->installation_level,
-                            'status' => $inst->status,
-                            'notes' => $inst->notes ?? null,
-                            'images' => is_array($inst->images) ? $inst->images : (json_decode($inst->images ?? '[]', true) ?: []),
-                            'completed_at' => $inst->completed_at?->toIso8601String(),
-                            'is_scheduled_assigned' => (bool) $inst->is_scheduled_assigned,
-                            'created_at' => $inst->created_at?->toIso8601String(),
-                            'updated_at' => $inst->updated_at?->toIso8601String(),
-                        ];
-                    })
-                    ->values();
+                    return $itemData;
+                })->values();
 
                 // Optional filter by query param: ?only_my_items=1 or ?filter_items=assigned
                 $onlyMyItems = filter_var($request->query('only_my_items', false), FILTER_VALIDATE_BOOLEAN)
@@ -299,46 +307,110 @@ class ScheduledInstallationMobileController extends Controller
                 $orderInstallerName = $order->assigned_user_name
                     ?? ($allFormattedItems->firstWhere('assigned_installer_name')['assigned_installer_name'] ?? $installerName);
 
-                return [
+                // Shift text from technician schedule (e.g. "Shift: 9-10 Mar 2026")
+                $techSchedule = $order->technicianSchedules?->first();
+                $shiftText = null;
+                if ($techSchedule) {
+                    if (!empty($techSchedule->scheduled_time)) {
+                        $shiftText = 'Shift: ' . $techSchedule->scheduled_time;
+                    } elseif (!empty($techSchedule->scheduled_date)) {
+                        $shiftText = 'Shift: ' . \Carbon\Carbon::parse($techSchedule->scheduled_date)->format('j M Y');
+                    }
+                }
+                if (!$shiftText) {
+                    $shiftText = 'Shift: ' . ($order->created_at ? $order->created_at->format('j M Y') : '9-10 Mar 2026');
+                }
+
+                // Payment Status
+                $rawPaymentStatus = $order->payment_status ?: ($order->payment?->payment_status ?: 'paid');
+                $paymentStatusFormatted = ucfirst(strtolower(str_replace(['_', '-'], ' ', (string) $rawPaymentStatus)));
+                $isPaid = strtolower($rawPaymentStatus) === 'paid';
+                $paymentMethod = $order->payment_method ?: ($order->payment?->payment_method ?: 'Card');
+
+                // Financial calculations
+                $subtotal = (float) $allFormattedItems->sum(function ($it) {
+                    return (float) ($it['unit_price'] * $it['quantity']);
+                });
+                $totalAmount = (float) ($order->total_amount ?: $subtotal);
+                $currency = $order->payment?->currency ?: 'QAR';
+
+                // Date Formatting: e.g. "Nov 5 | 08:35" and relative "1h 12m ago"
+                $orderDateFormatted = $order->created_at ? $order->created_at->format('M j | H:i') : null;
+                $timeAgo = $order->created_at ? $order->created_at->diffForHumans() : null;
+
+                // Contact & WhatsApp URL
+                $cleanPhone = preg_replace('/[^0-9]/', '', (string) $order->customer_phone);
+                $whatsappUrl = $cleanPhone ? "https://wa.me/{$cleanPhone}" : null;
+
+                // Order summary breakdown
+                $orderSummary = [
+                    'subtotal' => $subtotal,
+                    'discount' => 0.00,
+                    'shipping' => 0.00,
+                    'total' => $totalAmount,
+                    'currency' => $currency,
+                ];
+
+                $isOrderFlagged = (bool) (
+                    $order->status === 'flagged'
+                    || $allFormattedItems->contains('status', 'flagged')
+                    || $order->items->contains('is_flagged', true)
+                );
+
+                $flagReason = null;
+                if ($isOrderFlagged) {
+                    $latestDisc = $order->discrepancies?->sortByDesc('id')->first()
+                        ?? OrderItemDiscrepancy::where('order_id', $order->id)->latest()->first();
+                    $flagReason = $latestDisc?->issue_type
+                        ?: ($order->items->firstWhere('flag_reason', '!=', null)?->flag_reason
+                            ?: ($order->flag_reason ?? 'Customer Unavailable'));
+                }
+
+                $orderData = [
                     'id' => $order->id,
-                    'order_id' => $order->id,
                     'order_number' => $order->order_number,
-                    'order_status' => $order->status,
                     'status' => $order->status,
-                    'customer_name' => $order->customer_name ?? 'N/A',
+                ];
+
+                if ($isOrderFlagged) {
+                    $orderData['reason'] = $flagReason;
+                }
+
+                $orderData = array_merge($orderData, [
+                    // Payment details
+                    'payment' => [
+                        'payment_status' => $paymentStatusFormatted,
+                        'payment_method' => $paymentMethod,
+                        'currency' => $currency,
+                        'total' => $totalAmount,
+                        'paid_amount' => $isPaid ? $totalAmount : (float) ($order->payment?->paid_amount ?? 0),
+                    ],
+
+                    // Customer & Contact
+                    'customer_name' => $order->customer_name ?? 'Customer',
                     'customer_phone' => $order->customer_phone ?? 'N/A',
                     'delivery_address' => $order->delivery_address ?? 'N/A',
-                    'total_amount' => (float) $order->total_amount,
-                    'bag_count' => (int) ($order->bag_count ?? 0),
-                    'is_assigned_to_me' => $isOrderAssignedToMe,
-                    'assigned_installer_id' => $orderInstallerId,
-                    'assigned_installer_name' => $orderInstallerName,
-                    'assigned_to' => $orderInstallerId,
-                    'assigned_user_name' => $orderInstallerName,
-                    'assigned_at' => $order->assigned_at?->toIso8601String(),
+                    'latitude' => 25.286106,
+                    'longitude' => 51.534817,
+
+                    // Delivery receipt (Signed slip / Proof of delivery Optional)
+                    'delivery_receipt' => null,
+
+                    // Order Summary breakdown (Subtotal, Discount, Shipping, Total)
+                    'order_summary' => $orderSummary,
+
                     'created_at' => $order->created_at?->toIso8601String(),
                     'updated_at' => $order->updated_at?->toIso8601String(),
-                    'total_items_count' => $allFormattedItems->count(),
-                    'items_count' => $displayItems->count(),
-                    'total_items' => $allFormattedItems->count(),
-                    'installation_items_count' => $installationItems->count(),
-                    'installations_count' => $orderInstallations->count(),
                     'items' => $displayItems,
-                    'order_items' => $allFormattedItems,
-                    'installation_items' => $installationItems,
-                    'order_installations' => $orderInstallations,
-                    'installations' => $orderInstallations,
-                    'product_tags' => $item->product_tags ?? null,
-                    'gift_wrap' => $item->gift_wrap ?? null,
-                ];
+                ]);
+
+                return $orderData;
             })->filter(function ($ord) {
-                return $ord['items_count'] > 0;
+                return count($ord['items']) > 0;
             })->values();
 
             return response()->json([
                 'status' => 'success',
-                'installer_user_id' => is_numeric($idStr) ? (int) $idStr : $idStr,
-                'installer_name' => $installerName ?? ('Installer #' . $idStr),
                 'count' => $formattedOrders->count(),
                 'data' => $formattedOrders,
             ], 200);
@@ -737,7 +809,12 @@ class ScheduledInstallationMobileController extends Controller
             // 3. Query orders with items and installation records
             $ordersQuery = Order::with([
                 'items.installation',
+                'items.installationImages',
                 'assignedUser',
+                'technicianSchedules',
+                'payment',
+                'installationImages',
+                'discrepancies',
                 'logs' => function ($q) {
                     $q->latest()->limit(10);
                 }
@@ -749,45 +826,61 @@ class ScheduledInstallationMobileController extends Controller
             });
 
             // Filter for orders where this installer is assigned
-            $ordersQuery->where(function ($q) use ($idStr, $installerName) {
-                $q->whereHas('items', function ($iq) use ($idStr, $installerName) {
-                    $iq->where('is_installable', true)
-                        ->where(function ($sub) use ($idStr, $installerName) {
+            $isAdmin = strtolower($installerUser?->role ?? '') === 'admin' || $idStr === '1';
+
+            if ($idStr !== 'all' && !$isAdmin && !filter_var($request->query('all', false), FILTER_VALIDATE_BOOLEAN)) {
+                $ordersQuery->where(function ($q) use ($idStr, $installerName) {
+                    $q->whereHas('items', function ($iq) use ($idStr, $installerName) {
+                        $iq->where('is_installable', true);
+                        $iq->where(function ($sub) use ($idStr, $installerName) {
                             $sub->where('assigned_to', $idStr);
                             if (!empty($installerName)) {
                                 $sub->orWhere('assigned_user_name', $installerName);
                             }
                         });
-                })
-                    ->orWhere('assigned_to', $idStr)
-                    ->orWhereHas('logs', function ($lq) use ($idStr) {
-                        $lq->where('user_id', $idStr)
-                            ->whereIn('action', [
-                                'scheduled_installation',
-                                'installation_assigned',
-                                'scheduled_installation_mobile',
-                                'update_installation_status'
-                            ]);
-                    });
+                    })
+                        ->orWhere('assigned_to', $idStr)
+                        ->orWhereHas('technicianSchedules', function ($tq) use ($idStr, $installerName) {
+                            $tq->where('technician_id', $idStr);
+                            if (!empty($installerName)) {
+                                $tq->orWhere('technician_name', $installerName);
+                            }
+                        })
+                        ->orWhereHas('logs', function ($lq) use ($idStr) {
+                            $lq->where('user_id', $idStr)
+                                ->whereIn('action', [
+                                    'start_installation',
+                                    'installation_started',
+                                    'scheduled_installation',
+                                    'installation_assigned',
+                                    'scheduled_installation_mobile',
+                                    'update_installation_status',
+                                    'technician_scheduled'
+                                ]);
+                        });
 
-                if (!empty($installerName)) {
-                    $q->orWhere('assigned_user_name', $installerName);
-                }
-            });
+                    if (!empty($installerName)) {
+                        $q->orWhere('assigned_user_name', $installerName);
+                    }
+                });
+            }
 
-            // Filter for completed or installed status across order_installations, orders, or order items
+            // Filter strictly for completed status across orders, order items, or order_installations
             $ordersQuery->where(function ($q) {
-                $q->whereIn('status', ['completed', 'installed'])
+                $q->where('status', 'completed')
                     ->orWhereHas('items', function ($iq) {
                         $iq->where('is_installable', true)
                             ->where(function ($iiq) {
-                                $iiq->whereIn('status', ['completed', 'installed'])
+                                $iiq->where('status', 'completed')
                                     ->orWhereHas('installation', function ($instQ) {
-                                        $instQ->whereIn('status', ['completed', 'installed']);
+                                        $instQ->where('status', 'completed');
                                     });
                             });
                     });
             });
+
+            // Do not include orders that are in_progress, started, or flagged
+            $ordersQuery->whereNotIn('status', ['in_progress', 'started', 'stated']);
 
             // Optional keyword search
             if ($request->filled('search')) {
@@ -808,206 +901,175 @@ class ScheduledInstallationMobileController extends Controller
                 });
             }
 
-            $orders = $ordersQuery->orderBy('updated_at', 'desc')->get();
+            $orders = $ordersQuery->distinct()->orderBy('updated_at', 'desc')->get()->unique('id');
 
-            // 4. Build both grouped orders and a flattened item list
-            $flattenedItems = [];
-
-            $formattedOrders = $orders->map(function ($order) use ($idStr, $installerName, &$flattenedItems) {
-                // Filter items to completed/installed items assigned to this installer (installable only)
-                $completedItems = $order->items->filter(function ($item) use ($idStr, $installerName, $order) {
+            // 4. Format results into structured mobile payload
+            $formattedOrders = $orders->map(function ($order) use ($idStr, $installerName, $request) {
+                // Filter items to completed installable items
+                $installableItems = $order->items->filter(function ($item) use ($order) {
                     if (!($item->is_installable ?? false)) {
                         return false;
                     }
-
                     $installation = $item->installation;
-                    $isItemCompleted = in_array($order->status, ['completed', 'installed'])
-                        || in_array($item->status, ['completed', 'installed'])
-                        || ($installation && in_array($installation->status, ['completed', 'installed']));
+                    return $order->status === 'completed'
+                        || $item->status === 'completed'
+                        || ($installation && $installation->status === 'completed');
+                });
 
-                    $isAssignedToThisInstaller = ((string) $item->assigned_to === $idStr)
-                        || (!empty($installerName) && $item->assigned_user_name === $installerName)
-                        || (empty($item->assigned_to) && ((string) $order->assigned_to === $idStr || (!empty($installerName) && $order->assigned_user_name === $installerName)));
-
-                    return $isItemCompleted && $isAssignedToThisInstaller;
-                })->values();
-
-                // Fallback for orders marked completed
-                if ($completedItems->isEmpty() && in_array($order->status, ['completed', 'installed'])) {
-                    $completedItems = $order->items->filter(function ($item) use ($idStr, $installerName, $order) {
-                        return (bool) ($item->is_installable ?? false)
-                            && (((string) $item->assigned_to === $idStr)
-                                || (!empty($installerName) && $item->assigned_user_name === $installerName)
-                                || ((string) $order->assigned_to === $idStr));
-                    })->values();
-                }
-
-                $mappedItems = $completedItems->map(function ($item) use ($idStr, $installerName, $order, &$flattenedItems) {
+                $allFormattedItems = $installableItems->map(function ($item) use ($idStr, $installerName, $order) {
                     $installation = $item->installation;
+                    $isInstallableBool = (bool) ($item->is_installable ?? false);
 
-                    $itemAssignedTo = $item->assigned_to ? (string) $item->assigned_to : null;
-                    $itemInstallerId = $itemAssignedTo
-                        ? (is_numeric($itemAssignedTo) ? (int) $itemAssignedTo : $itemAssignedTo)
-                        : ($order->assigned_to ? (is_numeric($order->assigned_to) ? (int) $order->assigned_to : $order->assigned_to) : (is_numeric($idStr) ? (int) $idStr : $idStr));
+                    $latestImg = $item->installationImages?->sortByDesc('id')->first()
+                        ?? InstallationImage::where('order_item_id', $item->id)->latest()->first()
+                        ?? ($order->installationImages?->sortByDesc('id')->first());
 
-                    $itemInstallerName = $item->assigned_user_name
-                        ?: ($item->assignedUser?->name
-                            ?: ($order->assigned_user_name ?? $installerName));
+                    $beforeImage = $latestImg?->before_install_image;
+                    $afterImage = $latestImg?->after_install_image;
 
-                    if (!$itemInstallerName && $itemInstallerId && class_exists(InstallationLevelController::class)) {
-                        $tech = collect(InstallationLevelController::TECHNICIANS)
-                            ->first(function ($t) use ($itemInstallerId) {
-                                return (string) ($t['id'] ?? '') === (string) $itemInstallerId
-                                    || (string) ($t['technician_id'] ?? '') === (string) $itemInstallerId;
-                            });
-                        if ($tech) {
-                            $itemInstallerName = $tech['name'] ?? ($tech['technician_name'] ?? null);
-                        }
+                    $instImages = is_array($installation?->images)
+                        ? $installation->images
+                        : (json_decode($installation?->images ?? '[]', true) ?: []);
+
+                    if (!$beforeImage && !empty($instImages[0])) {
+                        $beforeImage = $instImages[0];
+                    }
+                    if (!$afterImage && !empty($instImages[1])) {
+                        $afterImage = $instImages[1];
                     }
 
-                    if (!$itemInstallerName && $itemInstallerId) {
-                        $itemInstallerName = 'Installer #' . $itemInstallerId;
-                    }
+                    $unitPrice = (float) $item->unit_price;
+                    $qty = (int) $item->quantity;
+                    $sku = $item->product_code ?: ($item->barcode ?: "SKU-{$item->id}");
 
-                    $resolvedStatus = ($installation && in_array($installation->status, ['completed', 'installed']))
-                        ? $installation->status
-                        : (in_array($item->status, ['completed', 'installed']) ? $item->status : 'completed');
+                    $isInstalled = !empty($afterImage) || in_array($installation?->status, ['completed', 'installed']);
+
+                    $resolvedStatus = 'completed';
+
+                    $installationPayload = $installation ? [
+                        'id' => $installation->id,
+                        'order_item_id' => $installation->order_item_id,
+                        'installation_type' => $installation->installation_type,
+                        'installation_level' => $installation->installation_level,
+                        'status' => 'completed',
+                        'notes' => $installation->notes ?? null,
+                        'completed_at' => $installation->completed_at?->toIso8601String(),
+                        'is_scheduled_assigned' => (bool) $installation->is_scheduled_assigned,
+                        'created_at' => $installation->created_at?->toIso8601String(),
+                        'updated_at' => $installation->updated_at?->toIso8601String(),
+                    ] : null;
 
                     $itemData = [
                         'id' => $item->id,
-                        'order_item_id' => $item->id,
-                        'order_id' => $order->id,
-                        'order_number' => $order->order_number,
-                        'line_item_id' => $item->line_item_id,
-                        'product_id' => $item->product_id,
-                        'product_code' => $item->product_code,
-                        'barcode' => $item->barcode,
+                        'order_id' => $item->order_id,
+                        'line_item_id' => (string) $item->line_item_id,
                         'product_name' => $item->product_name,
+                        'sku' => $sku,
+                        'barcode' => $item->barcode,
                         'image' => $item->image,
-                        'quantity' => (int) $item->quantity,
-                        'unit_price' => (float) $item->unit_price,
-                        'status' => $resolvedStatus,
-                        'order_status' => $order->status,
-                        'is_installable' => (int) ($item->is_installable ? 1 : 0),
-                        'is_installable_bool' => (bool) $item->is_installable,
-                        'is_installable_label' => $item->is_installable ? 'yes' : 'no',
-                        'is_assigned_to_me' => true,
-                        'assigned_installer_id' => $itemInstallerId,
-                        'assigned_installer_name' => $itemInstallerName,
-                        'installer_id' => $itemInstallerId,
-                        'installer_name' => $itemInstallerName,
-                        'product_tags' => $item->product_tags ?? null,
-                        'gift_wrap' => $item->gift_wrap ?? null,
-                        'installer' => [
-                            'id' => $itemInstallerId,
-                            'name' => $itemInstallerName,
+                        'quantity' => $qty,
+                        'unit_price' => $unitPrice,
+                        'total_price' => (float) ($unitPrice * $qty),
+                        'currency' => 'QAR',
+                        'status' => 'completed',
+                        'installation_proof_photos' => [
+                            'before_install_image' => $beforeImage,
+                            'after_install_image' => $afterImage,
                         ],
-                        'customer_name' => $order->customer_name ?? 'N/A',
-                        'customer_phone' => $order->customer_phone ?? 'N/A',
-                        'delivery_address' => $order->delivery_address ?? 'N/A',
-                        'installation' => [
-                            'id' => $installation?->id,
-                            'order_item_id' => $installation?->order_item_id ?? $item->id,
-                            'installation_type' => $installation?->installation_type,
-                            'installation_level' => $installation?->installation_level,
-                            'status' => $resolvedStatus,
-                            'notes' => $installation?->notes ?? null,
-                            'images' => is_array($installation?->images) ? $installation->images : (json_decode($installation?->images ?? '[]', true) ?: []),
-                            'completed_at' => $installation?->completed_at?->toIso8601String(),
-                            'is_scheduled_assigned' => (bool) ($installation?->is_scheduled_assigned ?? true),
-                        ],
-                        'order_installation' => [
-                            'id' => $installation?->id,
-                            'order_item_id' => $installation?->order_item_id ?? $item->id,
-                            'installation_type' => $installation?->installation_type,
-                            'installation_level' => $installation?->installation_level,
-                            'status' => $resolvedStatus,
-                            'notes' => $installation?->notes ?? null,
-                            'product_tags' => $item->product_tags ?? null,
-                            'gift_wrap' => $item->gift_wrap ?? null,
-                            'images' => is_array($installation?->images) ? $installation->images : (json_decode($installation?->images ?? '[]', true) ?: []),
-                            'completed_at' => $installation?->completed_at?->toIso8601String(),
-                            'is_scheduled_assigned' => (bool) ($installation?->is_scheduled_assigned ?? true),
-                        ],
-                        'updated_at' => $installation?->updated_at?->toIso8601String() ?? $order->updated_at?->toIso8601String(),
+                        'is_installed' => $isInstalled,
                     ];
 
-                    $flattenedItems[] = $itemData;
+                    if ($installationPayload !== null) {
+                        $itemData['installation'] = $installationPayload;
+                    }
 
                     return $itemData;
                 })->values();
 
-                $orderInstallerId = $order->assigned_to
-                    ? (is_numeric($order->assigned_to) ? (int) $order->assigned_to : $order->assigned_to)
-                    : ($mappedItems->firstWhere('assigned_installer_id')['assigned_installer_id'] ?? (is_numeric($idStr) ? (int) $idStr : $idStr));
+                // Payment Status
+                $rawPaymentStatus = $order->payment_status ?: ($order->payment?->payment_status ?: 'paid');
+                $paymentStatusFormatted = ucfirst(strtolower(str_replace(['_', '-'], ' ', (string) $rawPaymentStatus)));
+                $isPaid = strtolower($rawPaymentStatus) === 'paid';
+                $paymentMethod = $order->payment_method ?: ($order->payment?->payment_method ?: 'Card');
 
-                $orderInstallerName = $order->assigned_user_name
-                    ?? ($mappedItems->firstWhere('assigned_installer_name')['assigned_installer_name'] ?? $installerName);
+                // Financial calculations
+                $subtotal = (float) $allFormattedItems->sum(function ($it) {
+                    return (float) ($it['unit_price'] * $it['quantity']);
+                });
+                $totalAmount = (float) ($order->total_amount ?: $subtotal);
+                $currency = $order->payment?->currency ?: 'QAR';
 
-                $orderInstallations = $order->items
-                    ->map(function ($it) {
-                        return $it->installation;
-                    })
-                    ->filter()
-                    ->map(function ($inst) {
-                        return [
-                            'id' => $inst->id,
-                            'order_item_id' => $inst->order_item_id,
-                            'installation_type' => $inst->installation_type,
-                            'installation_level' => $inst->installation_level,
-                            'status' => $inst->status,
-                            'notes' => $inst->notes ?? null,
-                            'product_tags' => $item->product_tags ?? null,
-                            'gift_wrap' => $item->gift_wrap ?? null,
-                            'images' => is_array($inst->images) ? $inst->images : (json_decode($inst->images ?? '[]', true) ?: []),
-                            'completed_at' => $inst->completed_at?->toIso8601String(),
-                            'is_scheduled_assigned' => (bool) $inst->is_scheduled_assigned,
-                        ];
-                    })->values();
+                // Order summary breakdown
+                $orderSummary = [
+                    'subtotal' => $subtotal,
+                    'discount' => 0.00,
+                    'shipping' => 0.00,
+                    'total' => $totalAmount,
+                    'currency' => $currency,
+                ];
 
-                return [
+                $isOrderFlagged = (bool) (
+                    $order->status === 'flagged'
+                    || $allFormattedItems->contains('status', 'flagged')
+                    || $order->items->contains('is_flagged', true)
+                );
+
+                $flagReason = null;
+                if ($isOrderFlagged) {
+                    $latestDisc = $order->discrepancies?->sortByDesc('id')->first()
+                        ?? OrderItemDiscrepancy::where('order_id', $order->id)->latest()->first();
+                    $flagReason = $latestDisc?->issue_type
+                        ?: ($order->items->firstWhere('flag_reason', '!=', null)?->flag_reason
+                            ?: ($order->flag_reason ?? 'Customer Unavailable'));
+                }
+
+                $orderData = [
                     'id' => $order->id,
-                    'order_id' => $order->id,
                     'order_number' => $order->order_number,
-                    'order_status' => $order->status,
-                    'status' => $order->status,
-                    'customer_name' => $order->customer_name ?? 'N/A',
+                ];
+
+                if ($isOrderFlagged) {
+                    $orderData['status'] = 'flagged';
+                    $orderData['reason'] = $flagReason;
+                }
+
+                $orderData = array_merge($orderData, [
+                    // Payment details
+                    'payment' => [
+                        'payment_status' => $paymentStatusFormatted,
+                        'payment_method' => $paymentMethod,
+                        'currency' => $currency,
+                        'total' => $totalAmount,
+                        'paid_amount' => $isPaid ? $totalAmount : (float) ($order->payment?->paid_amount ?? 0),
+                    ],
+
+                    // Customer & Contact
+                    'customer_name' => $order->customer_name ?? 'Customer',
                     'customer_phone' => $order->customer_phone ?? 'N/A',
                     'delivery_address' => $order->delivery_address ?? 'N/A',
-                    'total_amount' => (float) $order->total_amount,
-                    'bag_count' => (int) ($order->bag_count ?? 0),
-                    'is_assigned_to_me' => true,
-                    'assigned_installer_id' => $orderInstallerId,
-                    'assigned_installer_name' => $orderInstallerName,
-                    'installer_id' => $orderInstallerId,
-                    'installer_name' => $orderInstallerName,
-                    'installer_user_id' => $orderInstallerId,
+                    'latitude' => 25.286106,
+                    'longitude' => 51.534817,
+
+                    // Delivery receipt (Signed slip / Proof of delivery Optional)
+                    'delivery_receipt' => null,
+
+                    // Order Summary breakdown (Subtotal, Discount, Shipping, Total)
+                    'order_summary' => $orderSummary,
+
+                    'created_at' => $order->created_at?->toIso8601String(),
                     'updated_at' => $order->updated_at?->toIso8601String(),
-                    'total_items_count' => $order->items->count(),
-                    'items_count' => $mappedItems->count(),
-                    'installation_items_count' => $mappedItems->count(),
-                    'installations_count' => $orderInstallations->count(),
-                    'items' => $mappedItems,
-                    'order_items' => $mappedItems,
-                    'installation_items' => $mappedItems,
-                    'order_installations' => $orderInstallations,
-                    'installations' => $orderInstallations,
-                    'product_tags' => $item->product_tags ?? null,
-                    'gift_wrap' => $item->gift_wrap ?? null,
-                ];
+                    'items' => $allFormattedItems,
+                ]);
+
+                return $orderData;
             })->filter(function ($ord) {
-                return $ord['items_count'] > 0;
+                return count($ord['items']) > 0;
             })->values();
 
             return response()->json([
                 'status' => 'success',
-                'installer_user_id' => is_numeric($idStr) ? (int) $idStr : $idStr,
-                'installer_name' => $installerName ?? ('Installer #' . $idStr),
-                'status_filter' => 'completed',
-                'orders_count' => $formattedOrders->count(),
-                'items_count' => count($flattenedItems),
+                'count' => $formattedOrders->count(),
                 'data' => $formattedOrders,
-                'items_list' => $flattenedItems,
             ], 200);
 
         } catch (Exception $e) {
@@ -1450,7 +1512,8 @@ class ScheduledInstallationMobileController extends Controller
                                             'status' => 'completed',
                                             'action' => 'installation_completed',
                                         ]);
-                                    } catch (\Throwable $e) {}
+                                    } catch (\Throwable $e) {
+                                    }
                                 });
                             }
                         }
@@ -1470,7 +1533,8 @@ class ScheduledInstallationMobileController extends Controller
                                     'status' => $order->status,
                                     'action' => 'installation_completed',
                                 ]);
-                            } catch (\Throwable $e) {}
+                            } catch (\Throwable $e) {
+                            }
                         });
                     }
 
@@ -1647,6 +1711,9 @@ class ScheduledInstallationMobileController extends Controller
                         : (json_decode($primaryInstallation->images, true) ?: [$primaryInstallation->images]);
                 }
 
+                $isInstalled = !empty($latestImage?->after_install_image) || in_array($primaryInstallation?->status, ['installed', 'completed']);
+                $displayStatus = $isInstalled ? 'installed' : ($primaryInstallation?->status ?? 'in_progress');
+
                 return response()->json([
                     'status' => 'success',
                     'message' => 'Installed proof details retrieved successfully.',
@@ -1654,13 +1721,9 @@ class ScheduledInstallationMobileController extends Controller
                         'order_id' => $order->id,
                         'order_number' => $order->order_number,
                         'customer_name' => $order->customer_name,
-                        'order_status' => $order->status,
-                        'item_id' => $targetItem?->id,
+                        'status' => $displayStatus,
                         'order_item_id' => $targetItem?->id,
-                        'installation_status' => $primaryInstallation?->status ?? 'scheduled',
                         'notes' => $primaryInstallation?->notes ?? $latestImage?->notes,
-                        'product_tags' => $item->product_tags ?? null,
-                        'gift_wrap' => $item->gift_wrap ?? null,
                         'before_install_image' => $latestImage?->before_install_image,
                         'after_install_image' => $latestImage?->after_install_image,
                         'images_count' => count($images),
@@ -1806,13 +1869,12 @@ class ScheduledInstallationMobileController extends Controller
                 if (in_array($statusParam, ['inprogress', 'in_progress', 'started', 'stated'])) {
                     $normalizedStatus = 'in_progress';
                 } elseif (in_array($statusParam, ['installed', 'completed', 'done', 'finished', 'install', 'complete'])) {
-                    $normalizedStatus = 'completed';
+                    $normalizedStatus = 'installed';
                 } else {
                     $normalizedStatus = $statusParam;
                 }
             } else {
-                // Default status to completed when images are submitted as proof
-                $normalizedStatus = 'completed';
+                $normalizedStatus = !empty($afterImageUrl) ? 'installed' : 'in_progress';
             }
 
             // 8. Find existing record in installation_images table or create new if none exists
@@ -1873,15 +1935,21 @@ class ScheduledInstallationMobileController extends Controller
                 $allImageUrls[] = $installationImage->after_install_image;
             }
 
-            // 9. Store other fields in order_installations table
-            $targetItemsToUpdate = $orderItems->where('is_installable', true);
-            if ($targetItemsToUpdate->isEmpty() && $targetItem) {
-                $targetItemsToUpdate = collect([$targetItem]);
-            } elseif ($targetItemsToUpdate->isEmpty()) {
-                $targetItemsToUpdate = $orderItems;
+            if (!empty($installationImage->after_install_image) || !empty($afterImageUrl)) {
+                $normalizedStatus = 'installed';
             }
 
-            $completedAt = in_array($normalizedStatus, ['installed', 'completed']) ? now() : null;
+            // 9. Store other fields in order_installations table
+            if ($targetItem) {
+                $targetItemsToUpdate = collect([$targetItem]);
+            } else {
+                $targetItemsToUpdate = $orderItems->where('is_installable', true);
+                if ($targetItemsToUpdate->isEmpty()) {
+                    $targetItemsToUpdate = $orderItems;
+                }
+            }
+
+            $completedAt = ($normalizedStatus === 'completed') ? now() : null;
 
             foreach ($targetItemsToUpdate as $item) {
                 $inst = OrderInstallation::firstOrCreate(['order_item_id' => $item->id]);
@@ -1900,9 +1968,8 @@ class ScheduledInstallationMobileController extends Controller
                 }
                 $inst->save();
 
-                // If installed, update order item status if applicable
-                $validItemEnums = ['pending', 'picker_assigned', 'picked', 'packed', 'delivered', 'cancelled'];
-                if (in_array($normalizedStatus, ['installed', 'completed'])) {
+                // Only update order item status to packed when actually completed
+                if ($normalizedStatus === 'completed') {
                     $item->update(['status' => 'packed']);
                 }
             }
@@ -1923,11 +1990,25 @@ class ScheduledInstallationMobileController extends Controller
 
             // 11. Safe update for order status (respecting orders.status enum)
             $validOrderEnums = ['pending', 'picking', 'picked', 'packing', 'packed', 'ready_to_assign', 'assigned_to_driver', 'out_for_delivery', 'delivered', 'completed', 'flagged', 'exchange', 'cancelled'];
-            if (in_array($normalizedStatus, $validOrderEnums)) {
-                $order->update(['status' => $normalizedStatus]);
-            } elseif (in_array($normalizedStatus, ['installed', 'completed'])) {
-                $order->update(['status' => 'completed']);
+            if ($normalizedStatus === 'completed') {
+                try {
+                    $order->update(['status' => 'completed']);
+                } catch (\Throwable $e) {
+                    Log::warning('Could not update order status to completed: ' . $e->getMessage());
+                }
+            } elseif ($normalizedStatus === 'installed') {
+                // Item is installed, but installation is not completed yet.
+                // Do not modify orders table status.
+            } elseif (in_array($normalizedStatus, $validOrderEnums)) {
+                try {
+                    $order->update(['status' => $normalizedStatus]);
+                } catch (\Throwable $e) {
+                    Log::warning("Could not update order status to {$normalizedStatus}: " . $e->getMessage());
+                }
             }
+
+            $userName = $request->input('user_name') ?? (Auth::user()?->name ?? 'Mobile Installer');
+            $userId = $request->input('user_id') ?? Auth::id();
 
             if (in_array($order->fresh()->status, ['completed', 'delivered'])) {
                 $instUser = $userName;
@@ -1938,13 +2019,12 @@ class ScheduledInstallationMobileController extends Controller
                             'delivered_by' => $instUser,
                             'action' => 'installation_completed',
                         ]);
-                    } catch (\Throwable $e) {}
+                    } catch (\Throwable $e) {
+                    }
                 });
             }
 
             // 12. Create audit log in order_status_logs
-            $userName = $request->input('user_name') ?? (Auth::user()?->name ?? 'Mobile Installer');
-            $userId = $request->input('user_id') ?? Auth::id();
             $logAction = (!empty($beforeImageUrl) || !empty($afterImageUrl) || !empty($generalImageUrls))
                 ? 'installed_proof_uploaded'
                 : 'installation_notes_updated';
@@ -1962,50 +2042,14 @@ class ScheduledInstallationMobileController extends Controller
                 'gift_wrap' => $item->gift_wrap ?? null,
             ]);
 
+            $isInstalled = !empty($installationImage->after_install_image) || !empty($afterImageUrl) || in_array($normalizedStatus, ['installed', 'completed']);
+            $displayStatus = $isInstalled ? 'installed' : ($normalizedStatus ?: 'in_progress');
+
             return response()->json([
                 'status' => 'success',
                 'message' => 'Installed proof images and installation data saved successfully.',
                 'data' => [
-                    'order_id' => $order->id,
-                    'order_number' => $order->order_number,
-                    'customer_name' => $order->customer_name,
-                    'order_status' => $order->fresh()->status,
-                    'item_id' => $targetItem?->id,
-                    'order_item_id' => $targetItem?->id,
-                    'installation_status' => $normalizedStatus,
-                    'notes' => $notes !== null ? trim((string) $notes) : ($primaryInstallation?->notes ?? null),
-                    'product_tags' => $item->product_tags ?? null,
-                    'gift_wrap' => $item->gift_wrap ?? null,
-                    'before_install_image' => $installationImage->before_install_image,
-                    'after_install_image' => $installationImage->after_install_image,
-                    'all_images' => array_values(array_unique($allImageUrls)),
-                    'completed_at' => $completedAt?->toIso8601String(),
-                    'installation_image' => [
-                        'id' => $installationImage->id,
-                        'order_id' => $installationImage->order_id,
-                        'order_number' => $installationImage->order_number,
-                        'order_item_id' => $installationImage->order_item_id,
-                        'order_installation_id' => $installationImage->order_installation_id,
-                        'before_install_image' => $installationImage->before_install_image,
-                        'after_install_image' => $installationImage->after_install_image,
-                        'notes' => $installationImage->notes,
-                        'product_tags' => $item->product_tags ?? null,
-                        'gift_wrap' => $item->gift_wrap ?? null,
-                        'created_at' => $installationImage->created_at?->toIso8601String(),
-                    ],
-                    'order_installation' => [
-                        'id' => $primaryInstallation?->fresh()->id,
-                        'order_item_id' => $primaryInstallation?->fresh()->order_item_id,
-                        'installation_type' => $primaryInstallation?->fresh()->installation_type,
-                        'installation_level' => $primaryInstallation?->fresh()->installation_level,
-                        'status' => $primaryInstallation?->fresh()->status,
-                        'notes' => $primaryInstallation?->fresh()->notes,
-                        'product_tags' => $item->product_tags ?? null,
-                        'gift_wrap' => $item->gift_wrap ?? null,
-                        'completed_at' => $primaryInstallation?->fresh()->completed_at?->toIso8601String(),
-                        'is_scheduled_assigned' => (bool) $primaryInstallation?->fresh()->is_scheduled_assigned,
-                        'updated_at' => $primaryInstallation?->fresh()->updated_at?->toIso8601String(),
-                    ],
+                    'status' => $displayStatus,
                 ],
             ], 200);
 
@@ -2018,6 +2062,1294 @@ class ScheduledInstallationMobileController extends Controller
             return response()->json([
                 'status' => 'error',
                 'message' => 'Failed to upload installed proof images and save notes: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Start installation for multiple selected installation orders (Bulk Start Installation).
+     * Moves selected orders to 'in_progress' status, updates order_installations and technician_scheduled records,
+     * and records audit logs in order_status_logs. Once started, orders are removed from the main installation list.
+     *
+     * Route: POST|GET /api/mobile/scheduled/start-installation
+     * Route: POST|GET /api/mobile/scheduled/start
+     *
+     * @param Request $request
+     * @return JsonResponse
+     */
+    public function startInstallation(Request $request): JsonResponse
+    {
+        try {
+            $rawContent = $request->getContent();
+            $decodedJson = !empty($rawContent) ? json_decode($rawContent, true) : null;
+
+            $payload = array_merge($request->all(), is_array($request->json()?->all()) ? $request->json()->all() : []);
+            if (is_array($decodedJson)) {
+                $payload = array_merge($payload, $decodedJson);
+            }
+
+            // Collect selected order identifiers (IDs or numbers) from various formats (single or array)
+            $orderIdentifiers = [];
+
+            $collectItems = function ($input) use (&$orderIdentifiers, &$collectItems) {
+                if ($input === null || $input === '') {
+                    return;
+                }
+                if (is_array($input)) {
+                    foreach ($input as $key => $val) {
+                        if (is_array($val)) {
+                            $idVal = $val['order_number'] ?? ($val['order_id'] ?? ($val['orderNumber'] ?? ($val['orderId'] ?? ($val['id'] ?? null))));
+                            if ($idVal !== null && $idVal !== '') {
+                                $orderIdentifiers[] = $idVal;
+                            } else {
+                                $collectItems($val);
+                            }
+                        } elseif ($val !== null && $val !== '') {
+                            if (is_string($key) && in_array(strtolower($key), ['order_number', 'order_numbers', 'order_id', 'order_ids', 'order', 'orders', 'id', 'selected_orders', 'data'])) {
+                                $collectItems($val);
+                            } else {
+                                $orderIdentifiers[] = $val;
+                            }
+                        }
+                    }
+                } elseif (is_string($input)) {
+                    $trimmed = trim($input);
+                    if ($trimmed === '') {
+                        return;
+                    }
+                    if (
+                        (str_starts_with($trimmed, '[') && str_ends_with($trimmed, ']')) ||
+                        (str_starts_with($trimmed, '{') && str_ends_with($trimmed, '}'))
+                    ) {
+                        $inner = json_decode($trimmed, true);
+                        if (is_array($inner)) {
+                            $collectItems($inner);
+                            return;
+                        }
+                    }
+                    if (str_contains($trimmed, ',')) {
+                        foreach (explode(',', $trimmed) as $part) {
+                            $p = trim($part);
+                            if ($p !== '') {
+                                $orderIdentifiers[] = $p;
+                            }
+                        }
+                    } else {
+                        $orderIdentifiers[] = $trimmed;
+                    }
+                } elseif (is_numeric($input)) {
+                    $orderIdentifiers[] = $input;
+                }
+            };
+
+            // Support direct array in top-level JSON body: ["#1052", "#1053"] or [{"order_number": "#1052"}, ...]
+            if (is_array($decodedJson)) {
+                $collectItems($decodedJson);
+            }
+
+            // Support fields in payload/request (both array and string format): order_number, order_numbers, orders, order_id, order_ids, selected_orders
+            $collectItems($payload['order_number'] ?? null);
+            $collectItems($payload['order_numbers'] ?? null);
+            $collectItems($payload['orders'] ?? null);
+            $collectItems($payload['selected_orders'] ?? null);
+            $collectItems($payload['order_ids'] ?? null);
+            $collectItems($payload['order_id'] ?? null);
+            $collectItems($payload['id'] ?? null);
+            $collectItems($request->input('order_number'));
+            $collectItems($request->input('order_numbers'));
+            $collectItems($request->input('orders'));
+            $collectItems($request->input('order_id'));
+            $collectItems($request->input('order_ids'));
+            $collectItems($request->query('order_number'));
+            $collectItems($request->query('order_numbers'));
+
+            $orderIdentifiers = array_values(array_unique(array_filter($orderIdentifiers)));
+
+            if (empty($orderIdentifiers)) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Please select at least one installation order to start (pass order_number array or order_id).',
+                ], 422);
+            }
+
+            // Resolve installer details
+            $installerUserId = $payload['installer_user_id']
+                ?? $payload['installer_id']
+                ?? $payload['user_id']
+                ?? $request->input('installer_user_id')
+                ?? $request->input('installer_id')
+                ?? $request->input('user_id')
+                ?? $request->route('installer_userid')
+                ?? Auth::id();
+
+            $installerUser = $installerUserId ? User::find($installerUserId) : null;
+            $installerUserName = $payload['user_name']
+                ?? $payload['installer_name']
+                ?? $request->input('user_name')
+                ?? $request->input('installer_name')
+                ?? ($installerUser?->name ?? (Auth::user()?->name ?? 'Mobile Installer'));
+
+            if (!$installerUserName && $installerUserId && class_exists(InstallationLevelController::class)) {
+                $tech = collect(InstallationLevelController::TECHNICIANS)
+                    ->first(function ($t) use ($installerUserId) {
+                        return (string) ($t['id'] ?? '') === (string) $installerUserId
+                            || (string) ($t['technician_id'] ?? '') === (string) $installerUserId;
+                    });
+                if ($tech) {
+                    $installerUserName = $tech['name'] ?? ($tech['technician_name'] ?? null);
+                }
+            }
+
+            $notes = $payload['notes'] ?? $request->input('notes', 'Installation started by mobile installer');
+
+            $startedOrders = [];
+            $failedOrders = [];
+
+            DB::transaction(function () use ($orderIdentifiers, $installerUserId, $installerUserName, $notes, &$startedOrders, &$failedOrders) {
+                foreach ($orderIdentifiers as $identifier) {
+                    $idStr = trim((string) $identifier);
+                    $cleanNum = ltrim($idStr, '#');
+
+                    $order = Order::with(['items.installation'])
+                        ->where(function ($q) use ($idStr, $cleanNum) {
+                            $q->where('id', $idStr)
+                                ->orWhere('order_number', $idStr)
+                                ->orWhere('order_number', $cleanNum)
+                                ->orWhere('order_number', '#' . $cleanNum);
+                        })->first();
+
+                    if (!$order) {
+                        $failedOrders[] = [
+                            'identifier' => $identifier,
+                            'reason' => "Order '{$identifier}' not found.",
+                        ];
+                        continue;
+                    }
+
+                    $oldStatus = $order->status;
+
+                    // 1. Update Order status to 'in_progress'
+                    try {
+                        $order->status = 'in_progress';
+                        if (!empty($installerUserId) && empty($order->assigned_to)) {
+                            $order->assigned_to = $installerUserId;
+                            $order->assigned_user_name = $installerUserName;
+                        }
+                        $order->save();
+                    } catch (\Throwable $e) {
+                        Log::warning("Could not update orders.status to in_progress for order #{$order->order_number}: " . $e->getMessage());
+                    }
+
+                    // 2. Update installable items and order_installations table
+                    $installableItems = $order->items->where('is_installable', true);
+                    if ($installableItems->isEmpty()) {
+                        $installableItems = $order->items;
+                    }
+
+                    foreach ($installableItems as $item) {
+                        if (Schema::hasTable('order_installations')) {
+                            OrderInstallation::updateOrCreate(
+                                ['order_item_id' => $item->id],
+                                [
+                                    'status' => 'in_progress',
+                                    'is_scheduled_assigned' => true,
+                                    'notes' => $notes,
+                                ]
+                            );
+                        }
+                    }
+
+                    // 3. Update technician_scheduled if table exists
+                    if (Schema::hasTable('technician_scheduled')) {
+                        TechnicianScheduled::where('order_id', $order->id)
+                            ->update([
+                                'status' => 'in_progress',
+                            ]);
+                    }
+
+                    // 4. Audit log in order_status_logs
+                    OrderStatusLog::create([
+                        'order_id' => $order->id,
+                        'user_id' => $installerUserId,
+                        'user_name' => $installerUserName,
+                        'action' => 'start_installation',
+                        'old_status' => $oldStatus,
+                        'new_status' => 'in_progress',
+                        'notes' => $notes ?: "Installation started for Order #{$order->order_number}",
+                    ]);
+
+                    $startedOrders[] = [
+                        'order_id' => $order->id,
+                        'order_number' => $order->order_number,
+                        'customer_name' => $order->customer_name ?? 'N/A',
+                        'customer_phone' => $order->customer_phone ?? 'N/A',
+                        'delivery_address' => $order->delivery_address ?? 'N/A',
+                        'total_amount' => (float) $order->total_amount,
+                        'old_status' => $oldStatus,
+                        'status' => 'in_progress',
+                        'order_status' => 'in_progress',
+                        'installation_status' => 'in_progress',
+                        'installer_user_id' => $installerUserId ? (is_numeric($installerUserId) ? (int) $installerUserId : $installerUserId) : null,
+                        'installer_name' => $installerUserName,
+                        'installable_items_count' => $installableItems->count(),
+                        'started_at' => now()->toIso8601String(),
+                    ];
+                }
+            });
+
+            if (empty($startedOrders)) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'No orders could be started.',
+                    'failed_orders' => $failedOrders,
+                ], 400);
+            }
+
+            $response = [
+                'status' => 'success',
+                'message' => 'Installation started successfully for ' . count($startedOrders) . ' order(s).',
+                'installer_user_id' => $installerUserId ? (is_numeric($installerUserId) ? (int) $installerUserId : $installerUserId) : null,
+            ];
+
+            if ($request->boolean('verbose') || $request->boolean('include_data')) {
+                $response['installer_name'] = $installerUserName;
+                $response['started_count'] = count($startedOrders);
+                $response['failed_count'] = count($failedOrders);
+                $response['data'] = $startedOrders;
+                $response['orders'] = $startedOrders;
+                $response['failed_orders'] = $failedOrders;
+            }
+
+            return response()->json($response, 200);
+
+        } catch (Exception $e) {
+            Log::error('Error in startInstallation: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString(),
+                'request' => $request->all(),
+            ]);
+
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Failed to start installation: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Display all orders that have been started by the mobile user (Started Installation list).
+     *
+     * Route: GET|POST /api/mobile/scheduled/started/{installer_userid?}
+     * Route: GET|POST /api/mobile/scheduled/started-installations/{installer_userid?}
+     * Route: GET|POST /api/mobile/scheduled/started-list/{installer_userid?}
+     *
+     * @param Request $request
+     * @param int|string|null $installer_userid
+     * @return JsonResponse
+     */
+    public function getStartedInstallationList(Request $request, $installer_userid = null): JsonResponse
+    {
+        try {
+            // 1. Resolve installer user ID
+            $resolvedId = $installer_userid
+                ?? $request->route('installer_userid')
+                ?? $request->input('installer_userid')
+                ?? $request->input('installer_id')
+                ?? $request->input('user_id')
+                ?? $request->query('installer_userid')
+                ?? $request->query('installer_id')
+                ?? $request->query('user_id')
+                ?? Auth::id();
+
+            if (empty($resolvedId)) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Installer user ID is required. Pass installer_userid in the URL path or request body.',
+                ], 422);
+            }
+
+            $idStr = trim((string) $resolvedId);
+
+            // 2. Resolve installer details
+            $installerUser = User::find($idStr);
+            $installerName = $installerUser?->name;
+
+            if (!$installerName && class_exists(InstallationLevelController::class)) {
+                $tech = collect(InstallationLevelController::TECHNICIANS)
+                    ->first(function ($t) use ($idStr) {
+                        return (string) ($t['id'] ?? '') === $idStr
+                            || (string) ($t['technician_id'] ?? '') === $idStr;
+                    });
+                if ($tech) {
+                    $installerName = $tech['name'] ?? ($tech['technician_name'] ?? null);
+                }
+            }
+
+            // 3. Query orders with installable items assigned to this installer
+            $ordersQuery = Order::with([
+                'items.installation',
+                'items.installationImages',
+                'assignedUser',
+                'technicianSchedules',
+                'payment',
+                'installationImages',
+                'discrepancies',
+                'logs' => function ($q) {
+                    $q->latest()->limit(10);
+                }
+            ]);
+
+            // Filter orders to only those having installable items
+            $ordersQuery->whereHas('items', function ($iq) {
+                $iq->where('is_installable', true);
+            });
+
+            // Filter for orders where this installer is assigned (Admin or 'all' can view all)
+            $isAdmin = strtolower($installerUser?->role ?? '') === 'admin' || $idStr === '1';
+
+            if ($idStr !== 'all' && !$isAdmin && !filter_var($request->query('all', false), FILTER_VALIDATE_BOOLEAN)) {
+                $ordersQuery->where(function ($q) use ($idStr, $installerName) {
+                    $q->whereHas('items', function ($iq) use ($idStr, $installerName) {
+                        $iq->where('is_installable', true);
+                        $iq->where(function ($sub) use ($idStr, $installerName) {
+                            $sub->where('assigned_to', $idStr);
+                            if (!empty($installerName)) {
+                                $sub->orWhere('assigned_user_name', $installerName);
+                            }
+                        });
+                    })
+                        ->orWhere('assigned_to', $idStr)
+                        ->orWhereHas('technicianSchedules', function ($tq) use ($idStr, $installerName) {
+                            $tq->where('technician_id', $idStr);
+                            if (!empty($installerName)) {
+                                $tq->orWhere('technician_name', $installerName);
+                            }
+                        })
+                        ->orWhereHas('logs', function ($lq) use ($idStr) {
+                            $lq->where('user_id', $idStr)
+                                ->whereIn('action', [
+                                    'start_installation',
+                                    'installation_started',
+                                    'scheduled_installation',
+                                    'installation_assigned',
+                                    'scheduled_installation_mobile',
+                                    'update_installation_status',
+                                    'technician_scheduled'
+                                ]);
+                        });
+
+                    if (!empty($installerName)) {
+                        $q->orWhere('assigned_user_name', $installerName);
+                    }
+                });
+            }
+
+            // 4. Filter for STARTED / IN_PROGRESS / INSTALLED status
+            // The item is installed, but once the status is completed, then only remove from the list
+            $ordersQuery->where('status', '!=', 'completed')
+                ->where(function ($q) {
+                    $q->whereIn('status', ['in_progress', 'started', 'stated', 'installed'])
+                        ->orWhereHas('items', function ($iq) {
+                            $iq->where('is_installable', true)
+                                ->where(function ($iiq) {
+                                    $iiq->whereIn('status', ['in_progress', 'started', 'stated', 'installed'])
+                                        ->orWhereHas('installation', function ($instQ) {
+                                            $instQ->whereIn('status', ['in_progress', 'started', 'stated', 'installed']);
+                                        });
+                                });
+                        });
+                });
+
+            // Optional keyword search
+            if ($request->filled('search')) {
+                $search = trim($request->input('search'));
+                $cleanSearch = trim(ltrim($search, '#'));
+                $ordersQuery->where(function ($q) use ($search, $cleanSearch) {
+                    $q->where('order_number', 'like', "%{$search}%")
+                        ->orWhere('order_number', 'like', "%{$cleanSearch}%")
+                        ->orWhere('customer_name', 'like', "%{$search}%")
+                        ->orWhere('customer_phone', 'like', "%{$search}%")
+                        ->orWhereHas('items', function ($iq) use ($search) {
+                            $iq->where('is_installable', true)
+                                ->where(function ($piq) use ($search) {
+                                    $piq->where('product_name', 'like', "%{$search}%")
+                                        ->orWhere('product_code', 'like', "%{$search}%");
+                                });
+                        });
+                });
+            }
+
+            $orders = $ordersQuery->orderBy('updated_at', 'desc')->get();
+
+            // 5. Format results in the exact mobile payload structure
+            $formattedOrders = $orders->map(function ($order) use ($idStr, $installerName, $request) {
+                $installableItems = $order->items->filter(function ($item) {
+                    return (bool) ($item->is_installable ?? false);
+                });
+                $allFormattedItems = $installableItems->map(function ($item) use ($idStr, $installerName, $order) {
+                    $installation = $item->installation;
+                    $isInstallableBool = (bool) ($item->is_installable ?? false);
+
+                    $latestImg = $item->installationImages?->sortByDesc('id')->first()
+                        ?? InstallationImage::where('order_item_id', $item->id)->latest()->first()
+                        ?? ($order->installationImages?->sortByDesc('id')->first());
+
+                    $beforeImage = $latestImg?->before_install_image;
+                    $afterImage = $latestImg?->after_install_image;
+
+                    $instImages = is_array($installation?->images)
+                        ? $installation->images
+                        : (json_decode($installation?->images ?? '[]', true) ?: []);
+
+                    if (!$beforeImage && !empty($instImages[0])) {
+                        $beforeImage = $instImages[0];
+                    }
+                    if (!$afterImage && !empty($instImages[1])) {
+                        $afterImage = $instImages[1];
+                    }
+
+                    $unitPrice = (float) $item->unit_price;
+                    $qty = (int) $item->quantity;
+                    $sku = $item->product_code ?: ($item->barcode ?: "SKU-{$item->id}");
+
+                    $itemAssignedTo = $item->assigned_to ? (string) $item->assigned_to : null;
+                    $itemInstallerId = $itemAssignedTo
+                        ? (is_numeric($itemAssignedTo) ? (int) $itemAssignedTo : $itemAssignedTo)
+                        : ($order->assigned_to ? (is_numeric($order->assigned_to) ? (int) $order->assigned_to : $order->assigned_to) : (is_numeric($idStr) ? (int) $idStr : $idStr));
+
+                    $itemInstallerName = $item->assigned_user_name
+                        ?: ($item->assignedUser?->name
+                            ?: ($order->assigned_user_name ?? $installerName));
+
+                    if (!$itemInstallerName && $itemInstallerId && class_exists(InstallationLevelController::class)) {
+                        $tech = collect(InstallationLevelController::TECHNICIANS)
+                            ->first(function ($t) use ($itemInstallerId) {
+                                return (string) ($t['id'] ?? '') === (string) $itemInstallerId
+                                    || (string) ($t['technician_id'] ?? '') === (string) $itemInstallerId;
+                            });
+                        if ($tech) {
+                            $itemInstallerName = $tech['name'] ?? ($tech['technician_name'] ?? null);
+                        }
+                    }
+
+                    if (!$itemInstallerName && $itemInstallerId) {
+                        $itemInstallerName = 'Installer #' . $itemInstallerId;
+                    }
+
+                    $isAssignedToThisInstaller = ((string) $item->assigned_to === $idStr)
+                        || (!empty($installerName) && $item->assigned_user_name === $installerName)
+                        || (empty($item->assigned_to) && ((string) $order->assigned_to === $idStr || (!empty($installerName) && $order->assigned_user_name === $installerName)));
+
+                    $isInstalled = !empty($afterImage) || in_array($installation?->status, ['completed', 'installed']);
+
+                    $installationPayload = $installation ? [
+                        'id' => $installation->id,
+                        'order_item_id' => $installation->order_item_id,
+                        'installation_type' => $installation->installation_type,
+                        'installation_level' => $installation->installation_level,
+                        'status' => $isInstalled ? 'installed' : 'in_progress',
+                        'notes' => $installation->notes ?? null,
+                        'completed_at' => $installation->completed_at?->toIso8601String(),
+                        'is_scheduled_assigned' => (bool) $installation->is_scheduled_assigned,
+                        'created_at' => $installation->created_at?->toIso8601String(),
+                        'updated_at' => $installation->updated_at?->toIso8601String(),
+                    ] : null;
+
+                    $itemData = [
+                        'id' => $item->id,
+                        'order_id' => $item->order_id,
+                        'line_item_id' => $item->line_item_id,
+                        'product_name' => $item->product_name,
+                        'sku' => $sku,
+                        'barcode' => $item->barcode,
+                        'image' => $item->image,
+                        'quantity' => $qty,
+                        'unit_price' => $unitPrice,
+                        'total_price' => (float) ($unitPrice * $qty),
+                        'currency' => 'QAR',
+                        'status' => $isInstalled ? 'installed' : 'in_progress',
+                        'installation_proof_photos' => [
+                            'before_install_image' => $beforeImage,
+                            'after_install_image' => $afterImage,
+                        ],
+                        'is_installed' => $isInstalled,
+                    ];
+
+                    if ($installationPayload !== null) {
+                        $itemData['installation'] = $installationPayload;
+                    }
+
+                    return $itemData;
+                })->values();
+
+                $isOrderAssignedToMe = ((string) $order->assigned_to === $idStr)
+                    || (!empty($installerName) && $order->assigned_user_name === $installerName)
+                    || $allFormattedItems->contains('is_assigned_to_me', true);
+
+                $orderInstallerId = $order->assigned_to
+                    ? (is_numeric($order->assigned_to) ? (int) $order->assigned_to : $order->assigned_to)
+                    : ($allFormattedItems->firstWhere('assigned_installer_id')['assigned_installer_id'] ?? (is_numeric($idStr) ? (int) $idStr : $idStr));
+
+                $orderInstallerName = $order->assigned_user_name
+                    ?? ($allFormattedItems->firstWhere('assigned_installer_name')['assigned_installer_name'] ?? $installerName);
+
+                // Shift text from technician schedule (e.g. "Shift: 9-10 Mar 2026")
+                $techSchedule = $order->technicianSchedules?->first();
+                $shiftText = null;
+                if ($techSchedule) {
+                    if (!empty($techSchedule->scheduled_time)) {
+                        $shiftText = 'Shift: ' . $techSchedule->scheduled_time;
+                    } elseif (!empty($techSchedule->scheduled_date)) {
+                        $shiftText = 'Shift: ' . \Carbon\Carbon::parse($techSchedule->scheduled_date)->format('j M Y');
+                    }
+                }
+                if (!$shiftText) {
+                    $shiftText = 'Shift: ' . ($order->created_at ? $order->created_at->format('j M Y') : '9-10 Mar 2026');
+                }
+
+                // Payment Status
+                $rawPaymentStatus = $order->payment_status ?: ($order->payment?->payment_status ?: 'paid');
+                $paymentStatusFormatted = ucfirst(strtolower(str_replace(['_', '-'], ' ', (string) $rawPaymentStatus)));
+                $isPaid = strtolower($rawPaymentStatus) === 'paid';
+                $paymentMethod = $order->payment_method ?: ($order->payment?->payment_method ?: 'Card');
+
+                // Financial calculations
+                $subtotal = (float) $allFormattedItems->sum(function ($it) {
+                    return (float) ($it['unit_price'] * $it['quantity']);
+                });
+                $totalAmount = (float) ($order->total_amount ?: $subtotal);
+                $currency = $order->payment?->currency ?: 'QAR';
+
+                // Date Formatting: e.g. "Nov 5 | 08:35" and relative "1h 12m ago"
+                $orderDateFormatted = $order->created_at ? $order->created_at->format('M j | H:i') : null;
+                $timeAgo = $order->created_at ? $order->created_at->diffForHumans() : null;
+
+                // Contact & WhatsApp URL
+                $cleanPhone = preg_replace('/[^0-9]/', '', (string) $order->customer_phone);
+                $whatsappUrl = $cleanPhone ? "https://wa.me/{$cleanPhone}" : null;
+
+                // Order summary breakdown
+                $orderSummary = [
+                    'subtotal' => $subtotal,
+                    'discount' => 0.00,
+                    'shipping' => 0.00,
+                    'total' => $totalAmount,
+                    'currency' => $currency,
+                ];
+
+                $isOrderFlagged = (bool) (
+                    $order->status === 'flagged'
+                    || $allFormattedItems->contains('status', 'flagged')
+                    || $order->items->contains('is_flagged', true)
+                );
+
+                $flagReason = null;
+                if ($isOrderFlagged) {
+                    $latestDisc = $order->discrepancies?->sortByDesc('id')->first()
+                        ?? OrderItemDiscrepancy::where('order_id', $order->id)->latest()->first();
+                    $flagReason = $latestDisc?->issue_type
+                        ?: ($order->items->firstWhere('flag_reason', '!=', null)?->flag_reason
+                            ?: ($order->flag_reason ?? 'Customer Unavailable'));
+                }
+
+                $orderData = [
+                    'id' => $order->id,
+                    'order_number' => $order->order_number,
+                ];
+
+                if ($isOrderFlagged) {
+                    $orderData['status'] = 'flagged';
+                    $orderData['reason'] = $flagReason;
+                }
+
+                $orderData = array_merge($orderData, [
+                    // Payment details
+                    'payment' => [
+                        'payment_status' => $paymentStatusFormatted,
+                        'payment_method' => $paymentMethod,
+                        'currency' => $currency,
+                        'total' => $totalAmount,
+                        'paid_amount' => $isPaid ? $totalAmount : (float) ($order->payment?->paid_amount ?? 0),
+                    ],
+
+                    // Customer & Contact
+                    'customer_name' => $order->customer_name ?? 'Customer',
+                    'customer_phone' => $order->customer_phone ?? 'N/A',
+                    'delivery_address' => $order->delivery_address ?? 'N/A',
+                    'latitude' => 25.286106,
+                    'longitude' => 51.534817,
+
+                    // Delivery receipt (Signed slip / Proof of delivery Optional)
+                    'delivery_receipt' => null,
+
+                    // Order Summary breakdown (Subtotal, Discount, Shipping, Total)
+                    'order_summary' => $orderSummary,
+
+                    'created_at' => $order->created_at?->toIso8601String(),
+                    'updated_at' => $order->updated_at?->toIso8601String(),
+                    'items' => $allFormattedItems,
+                ]);
+
+                return $orderData;
+            })->values();
+
+            return response()->json([
+                'status' => 'success',
+                'message' => 'Started installation orders retrieved successfully.',
+                'count' => $formattedOrders->count(),
+                'data' => $formattedOrders,
+            ], 200);
+
+        } catch (Exception $e) {
+            Log::error('Error in getStartedInstallationList: ' . $e->getMessage(), [
+                'installer_userid' => $installer_userid,
+                'trace' => $e->getTraceAsString(),
+            ]);
+
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Failed to retrieve started installation list: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Flag an installation order with issue reason, optional comments, and optional attached photo.
+     *
+     * Supported issue reasons from mobile screen:
+     * - Customer Unavailable
+     * - Wrong Address / Location
+     * - Customer Rescheduled
+     * - Site Not Ready for Installation
+     * - Item Damaged / Defective
+     * - Other Issue
+     *
+     * Route: POST|GET /api/mobile/scheduled/flag
+     * Route: POST|GET /api/mobile/scheduled/flag-order
+     * Route: POST|GET /api/mobile/scheduled/flag-installation
+     *
+     * @param Request $request
+     * @return JsonResponse
+     */
+    public function flagInstallation(Request $request): JsonResponse
+    {
+        try {
+            $payload = array_merge($request->all(), is_array($request->json()?->all()) ? $request->json()->all() : []);
+            if ($request->getContent()) {
+                $decoded = json_decode($request->getContent(), true);
+                if (is_array($decoded)) {
+                    $payload = array_merge($payload, $decoded);
+                }
+            }
+
+            // Extract order identifier
+            $orderNumberRaw = $payload['order_number']
+                ?? $request->input('order_number')
+                ?? $payload['orderNumber']
+                ?? ($payload['order_numbers'][0] ?? null);
+
+            if (is_array($orderNumberRaw)) {
+                $orderNumberRaw = $orderNumberRaw[0] ?? '';
+            }
+            $orderNumber = trim((string) $orderNumberRaw);
+            $orderId = $payload['order_id'] ?? $request->input('order_id') ?? $payload['orderId'] ?? null;
+            $itemId = $payload['item_id'] ?? $payload['order_item_id'] ?? $request->input('item_id') ?? $request->input('order_item_id') ?? null;
+
+            if (empty($orderNumber) && empty($orderId)) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'The order_number or order_id parameter is required.',
+                ], 422);
+            }
+
+            // Resolve Reason / Issue Type
+            $reason = trim((string) (
+                $payload['reason']
+                ?? $payload['issue_reason']
+                ?? $payload['issue_type']
+                ?? $payload['flag_reason']
+                ?? $request->input('reason')
+                ?? $request->input('issue_reason')
+                ?? $request->input('issue_type')
+                ?? $request->input('flag_reason')
+                ?? 'Customer Unavailable'
+            ));
+
+            if (empty($reason)) {
+                $reason = 'Customer Unavailable';
+            }
+
+            // Additional Comments (Optional)
+            $comment = trim((string) (
+                $payload['comment']
+                ?? $payload['comments']
+                ?? $payload['additional_comments']
+                ?? $payload['notes']
+                ?? $request->input('comment')
+                ?? $request->input('comments')
+                ?? $request->input('additional_comments')
+                ?? $request->input('notes')
+                ?? ''
+            ));
+
+            // Find Order
+            $order = null;
+            if (!empty($orderId)) {
+                $order = Order::with('items')->find($orderId);
+            }
+            if (!$order && !empty($orderNumber)) {
+                $cleanNum = ltrim($orderNumber, '#');
+                $order = Order::with('items')
+                    ->where('order_number', $orderNumber)
+                    ->orWhere('order_number', $cleanNum)
+                    ->orWhere('order_number', '#' . $cleanNum)
+                    ->orWhere('id', $orderNumber)
+                    ->first();
+            }
+
+            if (!$order) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => "Order '{$orderNumber}' not found.",
+                ], 404);
+            }
+
+            // Target Item (if specified or installable item)
+            $targetItem = null;
+            if ($itemId) {
+                $targetItem = $order->items->where('id', $itemId)->first();
+            }
+            if (!$targetItem) {
+                $targetItem = $order->items->where('is_installable', true)->first()
+                    ?? $order->items->first();
+            }
+
+            // Photo / Attachment handling
+            $photoUrl = $payload['photo_url']
+                ?? $payload['image_url']
+                ?? $request->input('photo_url')
+                ?? $request->input('image_url')
+                ?? null;
+
+            $fileKey = null;
+            if ($request->hasFile('photo')) {
+                $fileKey = 'photo';
+            } elseif ($request->hasFile('file')) {
+                $fileKey = 'file';
+            } elseif ($request->hasFile('image')) {
+                $fileKey = 'image';
+            } elseif ($request->hasFile('attachment')) {
+                $fileKey = 'attachment';
+            } elseif ($request->hasFile('proof')) {
+                $fileKey = 'proof';
+            }
+
+            if ($fileKey && $request->file($fileKey)->isValid()) {
+                $uploadedFile = $request->file($fileKey);
+                $uploadDir = public_path('uploads/installation_flags');
+                if (!file_exists($uploadDir)) {
+                    mkdir($uploadDir, 0777, true);
+                }
+                $ext = $uploadedFile->getClientOriginalExtension() ?: 'jpg';
+                $filename = 'flag_' . preg_replace('/[^A-Za-z0-9_\-]/', '', $order->order_number) . '_' . time() . '_' . substr(md5(uniqid('', true)), 0, 6) . '.' . $ext;
+                $uploadedFile->move($uploadDir, $filename);
+                $photoUrl = asset('uploads/installation_flags/' . $filename);
+            } elseif (!empty($payload['photo']) || !empty($payload['image']) || !empty($payload['attach_photo'])) {
+                $rawInputPhoto = $payload['photo'] ?? ($payload['image'] ?? $payload['attach_photo']);
+                if (is_string($rawInputPhoto) && preg_match('/^data:image\/(\w+);base64,/', $rawInputPhoto, $matches)) {
+                    $uploadDir = public_path('uploads/installation_flags');
+                    if (!file_exists($uploadDir)) {
+                        mkdir($uploadDir, 0777, true);
+                    }
+                    $ext = strtolower($matches[1]) ?: 'jpg';
+                    $b64 = substr($rawInputPhoto, strpos($rawInputPhoto, ',') + 1);
+                    $decoded = base64_decode($b64);
+                    if ($decoded !== false) {
+                        $filename = 'flag_' . preg_replace('/[^A-Za-z0-9_\-]/', '', $order->order_number) . '_' . time() . '_' . substr(md5(uniqid('', true)), 0, 6) . '.' . $ext;
+                        file_put_contents($uploadDir . DIRECTORY_SEPARATOR . $filename, $decoded);
+                        $photoUrl = asset('uploads/installation_flags/' . $filename);
+                    }
+                } elseif (is_string($rawInputPhoto) && filter_var($rawInputPhoto, FILTER_VALIDATE_URL)) {
+                    $photoUrl = $rawInputPhoto;
+                }
+            }
+
+            // Resolve installer user
+            $installerUserId = $payload['installer_user_id']
+                ?? $payload['installer_id']
+                ?? $payload['user_id']
+                ?? $request->input('installer_user_id')
+                ?? $request->input('installer_id')
+                ?? $request->input('user_id')
+                ?? Auth::id()
+                ?? $order->assigned_to;
+
+            $installerUser = $installerUserId ? User::find($installerUserId) : null;
+            $installerUserName = $payload['user_name']
+                ?? $payload['installer_name']
+                ?? $request->input('user_name')
+                ?? $request->input('installer_name')
+                ?? ($installerUser?->name ?? (Auth::user()?->name ?? ($order->assigned_user_name ?? 'Mobile Installer')));
+
+            $oldOrderStatus = $order->status;
+            $discrepancy = null;
+
+            DB::transaction(function () use ($order, $targetItem, $reason, $comment, $photoUrl, $installerUserId, $installerUserName, $oldOrderStatus, &$discrepancy) {
+                // 1. Create OrderItemDiscrepancy record
+                $discrepancy = OrderItemDiscrepancy::create([
+                    'order_id' => $order->id,
+                    'order_item_id' => $targetItem ? $targetItem->id : ($order->items->first()?->id ?? $order->id),
+                    'user_id' => $installerUserId,
+                    'user_name' => $installerUserName,
+                    'issue_type' => $reason,
+                    'comment' => $comment,
+                    'status' => 'open',
+                    'photo_url' => $photoUrl,
+                ]);
+
+                // 2. Create FlagImage record if table exists
+                if (Schema::hasTable('flag_images')) {
+                    try {
+                        FlagImage::create([
+                            'order_id' => $order->id,
+                            'order_number' => $order->order_number,
+                            'order_item_id' => $targetItem?->id,
+                            'line_item_id' => $targetItem?->line_item_id,
+                            'discrepancy_id' => $discrepancy->id,
+                            'image_url' => $photoUrl,
+                            'photo_url' => $photoUrl,
+                            'issue_type' => $reason,
+                            'comment' => $comment,
+                            'user_id' => $installerUserId,
+                            'user_name' => $installerUserName,
+                        ]);
+                    } catch (\Throwable $e) {
+                    }
+                }
+
+                // 3. Mark items as flagged in order_items table
+                if ($targetItem) {
+                    $targetItem->update([
+                        'is_flagged' => true,
+                        'flag_reason' => $reason,
+                    ]);
+                } else {
+                    foreach ($order->items as $item) {
+                        $item->update([
+                            'is_flagged' => true,
+                            'flag_reason' => $reason,
+                        ]);
+                    }
+                }
+
+                // 4. Update order_installations status if table exists
+                if (Schema::hasTable('order_installations')) {
+                    $instQuery = OrderInstallation::whereIn('order_item_id', $order->items->pluck('id'));
+                    if ($targetItem) {
+                        $instQuery = OrderInstallation::where('order_item_id', $targetItem->id);
+                    }
+                    $instQuery->update([
+                        'status' => 'flagged',
+                    ]);
+                }
+
+                // 5. Update technician_scheduled table if exists
+                if (Schema::hasTable('technician_scheduled')) {
+                    TechnicianScheduled::where('order_id', $order->id)
+                        ->update([
+                            'status' => 'flagged',
+                        ]);
+                }
+
+                // 6. Update order status to flagged
+                try {
+                    $order->update([
+                        'status' => 'flagged',
+                    ]);
+                } catch (\Throwable $e) {
+                    Log::warning("Could not set orders.status to flagged: " . $e->getMessage());
+                }
+
+                // 7. Audit log in order_status_logs
+                OrderStatusLog::create([
+                    'order_id' => $order->id,
+                    'order_item_id' => $targetItem ? $targetItem->id : null,
+                    'user_id' => $installerUserId,
+                    'user_name' => $installerUserName,
+                    'action' => 'installation_flagged_order',
+                    'old_status' => $oldOrderStatus,
+                    'new_status' => 'flagged',
+                    'notes' => "Order #{$order->order_number} flagged by installer {$installerUserName}. Reason: {$reason}" . ($comment ? ". Details: {$comment}" : ""),
+                ]);
+            });
+
+            return response()->json([
+                'status' => 'success',
+                'message' => "Order {$order->order_number} flagged successfully.",
+                'data' => [
+                    'order_id' => $order->id,
+                    'order_number' => $order->order_number,
+                    'order_status' => 'flagged',
+                    'status' => 'flagged',
+                    'reason' => $reason,
+                    'issue_reason' => $reason,
+                    'issue_type' => $reason,
+                    'comment' => $comment,
+                    'photo_url' => $photoUrl,
+                    'discrepancy_id' => $discrepancy?->id,
+                    'installer_user_id' => $installerUserId ? (is_numeric($installerUserId) ? (int) $installerUserId : $installerUserId) : null,
+                    'installer_name' => $installerUserName,
+                    'flagged_at' => now()->toIso8601String(),
+                ],
+            ], 200);
+
+        } catch (Exception $e) {
+            Log::error('Error in flagInstallation: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString(),
+                'request' => $request->all(),
+            ]);
+
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Failed to flag order: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Retrieve all flagged installation orders for a particular installer.
+     *
+     * Route: GET|POST /api/mobile/scheduled/flagged/{installer_userid?}
+     *
+     * @param Request $request
+     * @param int|string|null $installer_userid
+     * @return JsonResponse
+     */
+    public function getFlaggedInstallations(Request $request, $installer_userid = null): JsonResponse
+    {
+        try {
+            $resolvedId = $installer_userid
+                ?? $request->route('installer_userid')
+                ?? $request->input('installer_userid')
+                ?? $request->input('installer_id')
+                ?? $request->input('user_id')
+                ?? $request->query('installer_userid')
+                ?? $request->query('installer_id')
+                ?? $request->query('user_id')
+                ?? Auth::id();
+
+            if (empty($resolvedId)) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Installer user ID is required.',
+                ], 422);
+            }
+
+            $idStr = trim((string) $resolvedId);
+
+            $installerUser = User::find($idStr);
+            $installerName = $installerUser?->name;
+
+            $ordersQuery = Order::with([
+                'items.installation',
+                'items.installationImages',
+                'assignedUser',
+                'technicianSchedules',
+                'payment',
+                'discrepancies',
+                'logs' => function ($q) {
+                    $q->latest()->limit(10);
+                }
+            ]);
+
+            $ordersQuery->whereHas('items', function ($iq) {
+                $iq->where('is_installable', true);
+            });
+
+            if ($idStr !== 'all' && !filter_var($request->query('all', false), FILTER_VALIDATE_BOOLEAN)) {
+                $ordersQuery->where(function ($q) use ($idStr, $installerName) {
+                    $q->where('assigned_to', $idStr)
+                        ->orWhereHas('items', function ($iq) use ($idStr, $installerName) {
+                            $iq->where('assigned_to', $idStr);
+                            if (!empty($installerName)) {
+                                $iq->orWhere('assigned_user_name', $installerName);
+                            }
+                        })
+                        ->orWhereHas('discrepancies', function ($dq) use ($idStr) {
+                            $dq->where('user_id', $idStr);
+                        });
+
+                    if (!empty($installerName)) {
+                        $q->orWhere('assigned_user_name', $installerName);
+                    }
+                });
+            }
+
+            // Filter for flagged status
+            $ordersQuery->where(function ($q) {
+                $q->where('status', 'flagged')
+                    ->orWhereHas('items', function ($iq) {
+                        $iq->where('is_flagged', true)
+                            ->orWhereHas('installation', function ($instQ) {
+                                $instQ->where('status', 'flagged');
+                            });
+                    })
+                    ->orWhereHas('discrepancies', function ($dq) {
+                        $dq->where('status', 'open');
+                    });
+            });
+
+            $orders = $ordersQuery->orderBy('updated_at', 'desc')->get();
+
+            $formatted = $orders->map(function ($order) {
+                $latestDiscrepancy = OrderItemDiscrepancy::where('order_id', $order->id)->latest()->first();
+
+                return [
+                    'id' => $order->id,
+                    'order_id' => $order->id,
+                    'order_number' => $order->order_number,
+                    'status' => 'flagged',
+                    'order_status' => 'flagged',
+                    'customer_name' => $order->customer_name,
+                    'customer_phone' => $order->customer_phone,
+                    'delivery_address' => $order->delivery_address,
+                    'total_amount' => (float) $order->total_amount,
+                    'is_flagged' => true,
+                    'flag_reason' => $latestDiscrepancy?->issue_type ?? 'Customer Unavailable',
+                    'flag_comment' => $latestDiscrepancy?->comment ?? '',
+                    'photo_url' => $latestDiscrepancy?->photo_url,
+                    'flagged_at' => $latestDiscrepancy?->created_at?->toIso8601String() ?? $order->updated_at?->toIso8601String(),
+                    'discrepancy' => $latestDiscrepancy,
+                ];
+            })->values();
+
+            return response()->json([
+                'status' => 'success',
+                'installer_user_id' => is_numeric($idStr) ? (int) $idStr : $idStr,
+                'count' => $formatted->count(),
+                'data' => $formatted,
+            ], 200);
+
+        } catch (Exception $e) {
+            Log::error('Error in getFlaggedInstallations: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString(),
+            ]);
+
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Failed to retrieve flagged installations: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Mark an installed order as delivered with collected amount, payment method, and payment status.
+     *
+     * Route: GET|POST /api/mobile/scheduled/markas-delivered
+     *
+     * @param Request $request
+     * @return JsonResponse
+     */
+    public function installationMarkasDelivered(Request $request): JsonResponse
+    {
+        try {
+            $payload = array_merge(
+                $request->all(),
+                is_array($request->json()?->all()) ? $request->json()->all() : []
+            );
+
+            $orderNumber = $payload['order_number']
+                ?? $request->input('order_number')
+                ?? $payload['order_id']
+                ?? $request->input('order_id');
+
+            if (empty($orderNumber)) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Order number is required.',
+                ], 422);
+            }
+
+            $amount = $payload['amount']
+                ?? $request->input('amount')
+                ?? $payload['collected_amount']
+                ?? $request->input('collected_amount')
+                ?? $payload['total_amount']
+                ?? $request->input('total_amount');
+
+            $paymentMethod = $payload['payment_method']
+                ?? $request->input('payment_method')
+                ?? $payload['payment_type']
+                ?? $request->input('payment_type')
+                ?? 'Cash';
+
+            $paymentStatus = $payload['payment_status']
+                ?? $request->input('payment_status')
+                ?? 'Paid';
+
+            $installerUserId = $payload['installer_user_id']
+                ?? $request->input('installer_user_id')
+                ?? $payload['user_id']
+                ?? $request->input('user_id')
+                ?? Auth::id();
+
+            $userName = $payload['user_name']
+                ?? $request->input('user_name')
+                ?? (Auth::user()?->name ?? 'Mobile Installer');
+
+            $notes = $payload['notes'] ?? $request->input('notes');
+
+            // Find order
+            $cleanNum = trim(ltrim((string) $orderNumber, '#'));
+            $order = Order::with(['items.installation', 'payment'])->where(function ($q) use ($orderNumber, $cleanNum) {
+                $q->where('order_number', $orderNumber)
+                    ->orWhere('order_number', '#' . $cleanNum)
+                    ->orWhere('order_number', $cleanNum)
+                    ->orWhere('id', $orderNumber);
+            })->first();
+
+            if (!$order) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => "Order not found with order_number '{$orderNumber}'.",
+                ], 404);
+            }
+
+            $numericAmount = !is_null($amount) ? (float) $amount : (float) $order->total_amount;
+
+            return DB::transaction(function () use ($order, $paymentMethod, $paymentStatus, $numericAmount, $installerUserId, $userName, $notes) {
+                $oldStatus = $order->status;
+
+                // 1. Update order status and delivery fields
+                $orderUpdates = ['status' => 'completed'];
+                if (Schema::hasColumn('orders', 'delivered_at')) {
+                    $orderUpdates['delivered_at'] = now();
+                }
+                if (Schema::hasColumn('orders', 'delivered_by') && $installerUserId) {
+                    $orderUpdates['delivered_by'] = $installerUserId;
+                }
+                if (Schema::hasColumn('orders', 'delivered_user_name') && $userName) {
+                    $orderUpdates['delivered_user_name'] = $userName;
+                }
+                if (Schema::hasColumn('orders', 'payment_method') && $paymentMethod) {
+                    $orderUpdates['payment_method'] = $paymentMethod;
+                }
+                if (Schema::hasColumn('orders', 'payment_status') && $paymentStatus) {
+                    $orderUpdates['payment_status'] = $paymentStatus;
+                }
+                if (Schema::hasColumn('orders', 'collected_amount')) {
+                    $orderUpdates['collected_amount'] = $numericAmount;
+                }
+
+                $order->update($orderUpdates);
+
+                // 2. Update or create OrderPayment
+                if (Schema::hasTable('order_payments')) {
+                    OrderPayment::updateOrCreate(
+                        ['order_id' => $order->id],
+                        [
+                            'shopify_order_id' => $order->shopify_order_id,
+                            'payment_method' => $paymentMethod,
+                            'payment_status' => $paymentStatus,
+                            'paid_amount' => $numericAmount,
+                            'total_price' => (float) $order->total_amount,
+                            'currency' => $order->payment?->currency ?: 'QAR',
+                            'processed_at' => now(),
+                        ]
+                    );
+                }
+
+                // 3. Mark all installable items as completed
+                foreach ($order->items as $item) {
+                    if ((bool) ($item->is_installable ?? false)) {
+                        OrderInstallation::updateOrCreate(
+                            ['order_item_id' => $item->id],
+                            [
+                                'status' => 'completed',
+                                'completed_at' => now(),
+                                'notes' => $notes ?: 'Installed and marked as delivered',
+                                'is_scheduled_assigned' => true,
+                            ]
+                        );
+                    }
+
+                    // Safe item status update
+                    try {
+                        $item->update(['status' => 'delivered']);
+                    } catch (\Throwable $e) {}
+                }
+
+                // 4. Update technician_scheduled if present
+                if (Schema::hasTable('technician_scheduled')) {
+                    TechnicianScheduled::where('order_id', $order->id)->update([
+                        'status' => 'completed',
+                        'completed_at' => now(),
+                        'notes' => $notes ?: 'Delivered by installer',
+                    ]);
+                }
+
+                // 5. Update orders_driver_assigned if present
+                if (Schema::hasTable('orders_driver_assigned')) {
+                    OrderDriverAssigned::where('order_id', $order->id)->update([
+                        'driver_status' => 'delivered',
+                        'delivered_at' => now(),
+                        'payment_method' => $paymentMethod,
+                        'payment_status' => $paymentStatus,
+                        'collected_amount' => $numericAmount,
+                    ]);
+                }
+
+                // 6. Audit log in order_status_logs
+                OrderStatusLog::create([
+                    'order_id' => $order->id,
+                    'user_id' => $installerUserId,
+                    'user_name' => $userName,
+                    'action' => 'installation_marked_as_delivered',
+                    'old_status' => $oldStatus,
+                    'new_status' => 'completed',
+                    'notes' => "Order #{$order->order_number} marked as delivered by installer. Method: {$paymentMethod}, Amount: {$numericAmount}, Status: {$paymentStatus}" . ($notes ? " Notes: {$notes}" : ""),
+                ]);
+
+                // 7. Sync Shopify Fulfillment
+                DB::afterCommit(function () use ($order, $userName) {
+                    try {
+                        app(\App\Services\ShopifyService::class)->syncOrderFulfillmentToShopify($order, [
+                            'status' => 'completed',
+                            'delivered_by' => $userName,
+                            'action' => 'installation_marked_as_delivered',
+                        ]);
+                    } catch (\Throwable $e) {
+                        Log::warning("Shopify sync error on mark-as-delivered for order #{$order->order_number}: " . $e->getMessage());
+                    }
+                });
+
+                return response()->json([
+                    'status' => 'success',
+                    'message' => "Order {$order->order_number} marked as delivered successfully.",
+                    'data' => [
+                        'order_id' => $order->id,
+                        'order_number' => $order->order_number,
+                        'status' => 'completed',
+                        'order_status' => 'completed',
+                        'payment' => [
+                            'amount' => $numericAmount,
+                            'payment_method' => $paymentMethod,
+                            'payment_status' => $paymentStatus,
+                            'currency' => $order->payment?->currency ?: 'QAR',
+                        ],
+                        'delivered_at' => now()->toIso8601String(),
+                    ],
+                ], 200);
+            });
+
+        } catch (Exception $e) {
+            Log::error('Error in installationMarkasDelivered: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString(),
+                'request' => $request->all(),
+            ]);
+
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Failed to mark installation as delivered: ' . $e->getMessage(),
             ], 500);
         }
     }

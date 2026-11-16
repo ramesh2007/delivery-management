@@ -57,8 +57,8 @@ class Order extends Model
     {
         return $query->where(function ($q) {
             $q->where('status', 'cancelled')
-              ->orWhere('shopify_status', 'cancelled')
-              ->orWhereNotNull('cancelled_at');
+                ->orWhere('shopify_status', 'cancelled')
+                ->orWhereNotNull('cancelled_at');
         });
     }
 
@@ -68,11 +68,11 @@ class Order extends Model
     public function scopeNewOrders($query)
     {
         return $query->where('status', 'pending')
-                     ->where(function ($q) {
-                         $q->whereNull('shopify_status')
-                           ->orWhere('shopify_status', '!=', 'cancelled');
-                     })
-                     ->whereNull('cancelled_at');
+            ->where(function ($q) {
+                $q->whereNull('shopify_status')
+                    ->orWhere('shopify_status', '!=', 'cancelled');
+            })
+            ->whereNull('cancelled_at');
     }
 
     /**
@@ -86,10 +86,10 @@ class Order extends Model
     protected static function booted(): void
     {
         static::saved(function (Order $order) {
-            \Illuminate\Support\Facades\Cache::forget("order_details_endpoint_" . md5(trim((string)$order->id)));
+            \Illuminate\Support\Facades\Cache::forget("order_details_endpoint_" . md5(trim((string) $order->id)));
             if ($order->order_number) {
-                \Illuminate\Support\Facades\Cache::forget("order_details_endpoint_" . md5(trim((string)$order->order_number)));
-                \Illuminate\Support\Facades\Cache::forget("order_details_endpoint_" . md5(ltrim((string)$order->order_number, '#')));
+                \Illuminate\Support\Facades\Cache::forget("order_details_endpoint_" . md5(trim((string) $order->order_number)));
+                \Illuminate\Support\Facades\Cache::forget("order_details_endpoint_" . md5(ltrim((string) $order->order_number, '#')));
             }
             \Illuminate\Support\Facades\Cache::forget("admin_orders_new_p1_l15_s" . md5(''));
 
@@ -151,10 +151,10 @@ class Order extends Model
     /**
      * Get return and replacement records for this order.
      */
-    public function returnReplacements(): HasMany
-    {
-        return $this->hasMany(OrderReturnReplacement::class, 'order_id')->orderBy('created_at', 'desc');
-    }
+    // public function returnReplacements(): HasMany
+    // {
+    //     return $this->hasMany(OrderReturnReplacement::class, 'order_id')->orderBy('created_at', 'desc');
+    // }
 
     /**
      * Get the user/picker assigned to this order.
@@ -163,8 +163,9 @@ class Order extends Model
     {
         return $this->belongsTo(User::class, 'assigned_to');
     }
-    public function pickedUser(){
-        return $this->belongsTo(User::Class,'picked_by');
+    public function pickedUser()
+    {
+        return $this->belongsTo(User::class, 'picked_by');
     }
     /**
      * Get the user who packed this order.

@@ -188,149 +188,92 @@ class PickerManagementController extends Controller
 
 
 
+
     public function apiOrdersById(Request $request, $id)
-        {
-            $idStr = trim((string) $id);
+    {
+        $idStr = trim((string) $id);
 
-            /*
-            |--------------------------------------------------------------------------
-            | Get orders where at least ONE item is assigned to this picker
-            |
-            | Example:
-            |
-            | Order #1101
-            |   Item 1 -> assigned_to = 5
-            |   Item 2 -> assigned_to = 6
-            |   Item 3 -> NULL
-            |
-            | Picker 5 will see Order #1101 with Item 1.
-            | Picker 6 will see Order #1101 with Item 2.
-            |--------------------------------------------------------------------------
-            */
-
-            $query = Order::with([
-                'items' => function ($query) use ($idStr) {
-                    // Only return items assigned to requested picker
-                    $query->where('assigned_to', $idStr);
-                }
-            ])
-            ->where('status', 'picking')
-            ->orWhere('status', 'pending')
-
-            // Important:
-            // Order must have at least one item assigned
-            // to this requested picker.
-            ->whereHas('items', function ($query) use ($idStr) {
-                $query->where('assigned_to', $idStr);
-            });
+        
+        $query = Order::with([
+            'items' => function ($query) use ($idStr) {
+                $query->where('assigned_to', $idStr)
+                    ->whereIn('status', ['pending', 'picker_assigned']);
+            }
+        ])
+        ->where('assigned_to', $idStr)
+        ->whereIn('status', ['picking', 'pending'])
+        ->whereHas('items', function ($query) use ($idStr) {
+            $query->where('assigned_to', $idStr)
+                ->whereIn('status', ['pending', 'picker_assigned']);
+        });
 
 
-            /*
-            |--------------------------------------------------------------------------
-            | Pagination
-            |--------------------------------------------------------------------------
-            */
+        $orders = $query
+            ->orderBy('created_at', 'desc')
+            ->paginate(15);
 
-            $orders = $query
-                ->orderBy('created_at', 'desc')
-                ->paginate(15);
+        $orders->getCollection()->transform(function ($order) {
 
+            return [
+                'order_number' => $order->order_number,
 
-            /*
-            |--------------------------------------------------------------------------
-            | Format orders
-            |--------------------------------------------------------------------------
-            */
+                'created_at' => $order->created_at
+                    ? $order->created_at->toIso8601String()
+                    : null,
 
-            $orders->getCollection()->transform(function ($order) {
+                'status' => $order->status,
 
-                return [
-                    'order_number' => $order->order_number,
+                'product_tag' => $order->items->contains(function ($item) {
+                    return collect(explode(',', $item->product_tags ?? ''))
+                        ->map(fn($tag) => trim($tag))
+                        ->contains(fn($tag) => strcasecmp($tag, 'VS') === 0);
+                }) ? 'VS' : null,
 
-                    'created_at' => $order->created_at
-                        ? $order->created_at->toIso8601String()
-                        : null,
+                'items' => $order->items->map(function ($item) {
 
-                    'status' => $order->status,
-                    'product_tag' => $order->items->contains(function ($item) {
-                                        return collect(explode(',', $item->product_tags ?? ''))
-                                            ->map(fn($tag) => trim($tag))
-                                            ->contains('VS');
-                                    }) ? 'VS' : null,
+                    return [
+                        'line_item_id' => $item->line_item_id,
+                        'product_name' => $item->product_name,
+                        'sku' => $item->sku ?? $item->product_code ?? null,
+                        'barcode' => $item->barcode,
+                        'quantity' => (int) $item->quantity,
+                        'rack' => $item->rack ?? null,
+                        'bin' => $item->bin ?? null,
 
-                    /*
-                    |--------------------------------------------------------------------------
-                    | ONLY items assigned to this picker
-                    |--------------------------------------------------------------------------
-                    |
-                    | Even if the order has 3 items, if this picker owns
-                    | only 1 item, only that 1 item is returned.
-                    |
-                    */
+                        'imageUrl' => $item->image
+                            ?? $item->image_url
+                            ?? null,
 
-                    'items' => $order->items
-                        ->map(function ($item) {
+                        'product_tag' => collect(explode(',', $item->product_tags ?? ''))
+                            ->map(fn($tag) => trim($tag))
+                            ->contains(fn($tag) => strcasecmp($tag, 'VS') === 0)
+                                ? 'VS'
+                                : null,
 
-                            return [
-                                'line_item_id' => $item->line_item_id,
+                        'status' => $item->status,
+                        'is_installable' => (bool) $item->is_installable,
+                        'is_assigned' => !empty($item->assigned_to),
+                        'is_flagged' => (bool) $item->is_flagged,
+                        'flag_reason' => $item->flag_reason,
+                    ];
 
-                                'product_name' => $item->product_name,
+                })->values(),
+            ];
+        });
 
-                                'sku' => $item->sku ?? $item->product_code ?? null,
+        return response()->json([
+            'success' => true,
+            'data' => $orders->items(),
 
-                                'barcode' => $item->barcode,
+            'pagination' => [
+                'current_page' => $orders->currentPage(),
+                'per_page' => $orders->perPage(),
+                'total' => $orders->total(),
+                'has_more_pages' => $orders->hasMorePages(),
+            ],
+        ]);
+    }
 
-                                'quantity' => (int) $item->quantity,
-
-                                'rack' => $item->rack ?? null,
-
-                                'bin' => $item->bin ?? null,
-
-                                'imageUrl' => $item->image
-                                    ?? $item->image_url
-                                    ?? null,
-
-                                'product_tag' => collect(explode(',', $item->product_tags ?? ''))
-                                    ->map(fn ($tag) => trim($tag))
-                                    ->contains(fn ($tag) => strcasecmp($tag, 'VS') === 0)
-                                        ? 'VS'
-                                        : null,
-
-                                'status' => $item->status,
-
-                                'is_installable' => (bool) $item->is_installable,
-
-                                'is_assigned' => !empty($item->assigned_to),
-
-                                'is_flagged' => (bool) $item->is_flagged,
-
-                                'flag_reason' => $item->flag_reason,
-                            ];
-                        })
-                        ->values(),
-                ];
-            });
-
-
-            /*
-            |--------------------------------------------------------------------------
-            | Response
-            |--------------------------------------------------------------------------
-            */
-
-            return response()->json([
-                'success' => true,
-
-                'data' => $orders->items(),
-
-                'pagination' => [
-                    'current_page' => $orders->currentPage(),
-                    'per_page' => $orders->perPage(),
-                    'total' => $orders->total(),
-                    'has_more_pages' => $orders->hasMorePages(),
-                ],
-            ]);
-        }
     /**
      * Get completed/picked order details for a specific user ID where items were picked by that user
      * Route: GET /api/orders-complete/{id}

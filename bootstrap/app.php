@@ -13,6 +13,8 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
+        $middleware->trustProxies(at: '*');
+
         $middleware->alias([
             'role' => \App\Http\Middleware\EnsureUserHasRole::class,
             'permission' => \App\Http\Middleware\EnsureUserHasPermission::class,
@@ -25,6 +27,12 @@ return Application::configure(basePath: dirname(__DIR__))
             'api/webhooks/shopify/*',
             'shopify/webhooks',
             'webhooks/shopify',
+            'api/customer-care/whatsapp/webhook*',
+            'customer-care/whatsapp/webhook*',
+            'api/customer-care/messenger/webhook*',
+            'customer-care/messenger/webhook*',
+            'api/customer-care/instagram/webhook*',
+            'customer-care/instagram/webhook*',
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

@@ -416,6 +416,80 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
     }
 
     /**
+     * Fetch variant details (including barcode) from Shopify API by Variant ID
+     */
+    public function getVariant(string $variantId, ?string $shop = null, ?string $accessToken = null): array
+    {
+        $store = $this->resolveCredentials($shop, $accessToken);
+        if (!$store['success']) {
+            return [];
+        }
+
+        $shopDomain = $store['shop'];
+        $token = $store['access_token'];
+        $cleanVariantId = ltrim((string) $variantId, '#');
+        $url = "https://{$shopDomain}/admin/api/{$this->apiVersion}/variants/{$cleanVariantId}.json";
+
+        try {
+            $response = $this->executeShopifyGetWithRetry($url, $token, [], 3, 10);
+
+            if ($response->successful()) {
+                return $response->json('variant', []);
+            }
+        } catch (\Throwable $e) {
+            Log::error("Shopify API getVariant Exception: " . $e->getMessage());
+        }
+
+        return [];
+    }
+
+    /**
+     * Resolve the variant barcode from Shopify (cached for performance)
+     */
+    public function getVariantBarcode(?string $variantId, ?string $productId = null, ?string $sku = null, ?string $shop = null, ?string $accessToken = null): ?string
+    {
+        if (!empty($variantId)) {
+            $cleanVariantId = ltrim((string) $variantId, '#');
+            $cachedBarcode = Cache::remember("shopify_var_barcode_{$cleanVariantId}", now()->addDays(7), function () use ($cleanVariantId, $shop, $accessToken) {
+                $variant = $this->getVariant($cleanVariantId, $shop, $accessToken);
+                return !empty($variant['barcode']) ? trim((string)$variant['barcode']) : null;
+            });
+
+            if (!empty($cachedBarcode)) {
+                return $cachedBarcode;
+            }
+        }
+
+        if (!empty($productId)) {
+            $cleanProdId = ltrim((string) $productId, '#');
+            $cacheKey = "shopify_prod_barcode_{$cleanProdId}_" . ($variantId ?: ($sku ?: 'default'));
+            $prodBarcode = Cache::remember($cacheKey, now()->addDays(7), function () use ($cleanProdId, $variantId, $sku, $shop, $accessToken) {
+                $productResult = $this->getProduct($cleanProdId, $shop, $accessToken);
+                if (!empty($productResult['product']['variants']) && is_array($productResult['product']['variants'])) {
+                    foreach ($productResult['product']['variants'] as $v) {
+                        if (!empty($variantId) && (string)($v['id'] ?? '') === (string)$variantId) {
+                            return !empty($v['barcode']) ? trim((string)$v['barcode']) : null;
+                        }
+                        if (!empty($sku) && (string)($v['sku'] ?? '') === (string)$sku) {
+                            return !empty($v['barcode']) ? trim((string)$v['barcode']) : null;
+                        }
+                    }
+                    if (count($productResult['product']['variants']) === 1 && !empty($productResult['product']['variants'][0]['barcode'])) {
+                        return trim((string)$productResult['product']['variants'][0]['barcode']);
+                    }
+                }
+                return null;
+            });
+
+            if (!empty($prodBarcode)) {
+                return $prodBarcode;
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Helper to reliably parse and extract installation fields from metafields & line item properties
      */
     public function extractInstallationMetafields($metafields, array $properties = []): array
@@ -557,6 +631,11 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
 
                 if (is_array($itemTags)) {
                     $itemTags = implode(', ', array_filter($itemTags));
+                }
+
+                // Enrich barcode from Shopify variant if missing
+                if (empty($item['barcode']) && (!empty($variantIdStr) || !empty($productIdStr))) {
+                    $item['barcode'] = $this->getVariantBarcode($variantIdStr, $productIdStr, $item['sku'] ?? null, $shop, $accessToken);
                 }
 
                 $itemMetafields = $item['metafields'] ?? ($item['product']['metafields'] ?? null);
@@ -1122,7 +1201,13 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
                     $productCode = 'ITEM-' . md5(($item['title'] ?? $item['name'] ?? 'product') . ($item['price'] ?? 0));
                 }
 
-                $barcode = !empty($item['barcode']) ? $item['barcode'] : ($sku ?: $productCode);
+                $variantIdStr = !empty($item['variant_id']) ? (string) $item['variant_id'] : null;
+
+                // Resolve real variant barcode from Shopify variant, avoiding defaulting barcode to SKU
+                $barcode = !empty($item['barcode']) ? (string)$item['barcode'] : null;
+                if (empty($barcode) && (!empty($variantIdStr) || !empty($productIdStr))) {
+                    $barcode = $this->getVariantBarcode($variantIdStr, $productIdStr, $sku, $shop, $accessToken);
+                }
 
                 // 1. Precise lookup by line_item_id first to prevent cross-item contamination or duplication
                 $orderItem = null;
@@ -1386,7 +1471,7 @@ public function getProducts(?string $shop = null, ?string $accessToken = null, a
                     $updateData = [
                         'line_item_id' => $lineItemId ?: $orderItem->line_item_id,
                         'product_id' => $productIdStr ?: $orderItem->product_id,
-                        'barcode' => $barcode ?: $orderItem->barcode,
+                        'barcode' => $barcode ?: ($orderItem->barcode === $orderItem->product_code ? null : $orderItem->barcode),
                         'product_name' => $item['title'] ?? $item['name'] ?? $orderItem->product_name,
                         'image' => $itemImage ?: $orderItem->image,
                         'quantity' => $item['quantity'] ?? $orderItem->quantity,

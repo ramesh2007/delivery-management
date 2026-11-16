@@ -260,4 +260,241 @@ class ScheduledInstallationController extends Controller
             'data' => $formattedOrders,
         ]);
     }
+
+    /**
+     * Get order items with status = 'picked' and is_installable = true that are scheduled to a technician.
+     * Route: GET /installation-itmes/main-warehouse-picked
+     */
+    public function mainwarehousePicked(?Request $request = null)
+    {
+        $request = $request ?? request();
+
+        try {
+            $perPage = max(1, min((int) ($request->input('per_page') ?? $request->query('per_page', 15)), 100));
+            $isAll = $request->boolean('all') || $request->input('per_page') === 'all' || $request->query('per_page') === 'all';
+
+            $query = OrderItem::with([
+                'order',
+                'installation',
+                'technicianSchedule.technician:id,name,email,phone,status',
+                'technicianSchedules.technician:id,name,email,phone,status',
+                'pickedUser:id,name,email,phone',
+                'assignedUser:id,name,email,phone',
+            ])
+            ->where('status', 'picked')
+            ->where('is_installable', true)
+            ->where(function ($sub) {
+                $sub->whereHas('technicianSchedule', function ($tq) {
+                    $tq->whereNotNull('technician_id')
+                       ->where(function ($sq) {
+                           $sq->whereNull('status')
+                              ->orWhereNotIn('status', ['cancelled', 'rejected']);
+                       });
+                })->orWhereHas('technicianSchedules', function ($tq) {
+                    $tq->whereNotNull('technician_id')
+                       ->where(function ($sq) {
+                           $sq->whereNull('status')
+                              ->orWhereNotIn('status', ['cancelled', 'rejected']);
+                       });
+                })->orWhereHas('installation.technicianSchedule', function ($tq) {
+                    $tq->whereNotNull('technician_id')
+                       ->where(function ($sq) {
+                           $sq->whereNull('status')
+                              ->orWhereNotIn('status', ['cancelled', 'rejected']);
+                       });
+                })->orWhere(function ($oq) {
+                    $oq->whereHas('order.technicianSchedules', function ($tq) {
+                        $tq->whereNull('order_item_id')
+                           ->whereNotNull('technician_id')
+                           ->where(function ($sq) {
+                               $sq->whereNull('status')
+                                  ->orWhereNotIn('status', ['cancelled', 'rejected']);
+                           });
+                    });
+                });
+            });
+
+            // 1. Search filter
+            if ($request->filled('search') || $request->filled('q')) {
+                $search = trim((string) ($request->input('search') ?? $request->input('q')));
+                $cleanSearch = ltrim($search, '#');
+                $query->where(function ($q) use ($search, $cleanSearch) {
+                    $q->where('product_name', 'like', "%{$search}%")
+                      ->orWhere('product_code', 'like', "%{$search}%")
+                      ->orWhere('barcode', 'like', "%{$search}%")
+                      ->orWhere('line_item_id', 'like', "%{$search}%")
+                      ->orWhereHas('order', function ($oq) use ($search, $cleanSearch) {
+                          $oq->where('order_number', 'like', "%{$search}%")
+                             ->orWhere('order_number', 'like', "%{$cleanSearch}%")
+                             ->orWhere('customer_name', 'like', "%{$search}%")
+                             ->orWhere('customer_phone', 'like', "%{$search}%")
+                             ->orWhere('delivery_address', 'like', "%{$search}%");
+                      })
+                      ->orWhereHas('technicianSchedule', function ($tq) use ($search) {
+                          $tq->where('technician_name', 'like', "%{$search}%")
+                             ->orWhere('notes', 'like', "%{$search}%");
+                      });
+                });
+            }
+
+            // 2. Order ID / Order Number filter
+            if ($request->filled('order_id')) {
+                $query->where('order_id', $request->input('order_id'));
+            }
+
+            if ($request->filled('order_number')) {
+                $orderNum = trim((string) $request->input('order_number'));
+                $cleanNum = ltrim($orderNum, '#');
+                $query->whereHas('order', function ($oq) use ($orderNum, $cleanNum) {
+                    $oq->where('order_number', $orderNum)
+                       ->orWhere('order_number', $cleanNum)
+                       ->orWhere('order_number', '#' . $cleanNum);
+                });
+            }
+
+            // 3. Technician filter
+            if ($request->filled('technician_id')) {
+                $techId = $request->input('technician_id');
+                $query->where(function ($q) use ($techId) {
+                    $q->whereHas('technicianSchedule', function ($tq) use ($techId) {
+                        $tq->where('technician_id', $techId);
+                    })->orWhereHas('technicianSchedules', function ($tq) use ($techId) {
+                        $tq->where('technician_id', $techId);
+                    })->orWhereHas('installation.technicianSchedule', function ($tq) use ($techId) {
+                        $tq->where('technician_id', $techId);
+                    });
+                });
+            }
+
+            // 4. Scheduled Date filter
+            if ($request->filled('scheduled_date') || $request->filled('date')) {
+                $date = $request->input('scheduled_date') ?? $request->input('date');
+                $query->where(function ($q) use ($date) {
+                    $q->whereHas('technicianSchedule', function ($tq) use ($date) {
+                        $tq->whereDate('scheduled_date', $date);
+                    })->orWhereHas('technicianSchedules', function ($tq) use ($date) {
+                        $tq->whereDate('scheduled_date', $date);
+                    })->orWhereHas('installation.technicianSchedule', function ($tq) use ($date) {
+                        $tq->whereDate('scheduled_date', $date);
+                    });
+                });
+            }
+
+            // 5. Sorting
+            $query->orderBy('picked_at', 'desc')
+                  ->orderBy('updated_at', 'desc')
+                  ->orderBy('id', 'desc');
+
+            $formatItem = function (OrderItem $item) {
+                $order = $item->order;
+                $installation = $item->installation;
+                $schedule = $item->technicianSchedule
+                    ?? $item->technicianSchedules?->first()
+                    ?? $installation?->technicianSchedule
+                    ?? $order?->technicianSchedules?->first();
+                $technician = $schedule?->technician;
+
+                $scheduledDateStr = null;
+                if ($schedule?->scheduled_date) {
+                    $scheduledDateStr = is_string($schedule->scheduled_date)
+                        ? $schedule->scheduled_date
+                        : $schedule->scheduled_date->format('Y-m-d');
+                }
+
+                return [
+                    'id' => $item->id,
+                    'item_id' => $item->id,
+                    'order_item_id' => $item->id,
+                    'line_item_id' => $item->line_item_id,
+                    'order_id' => $item->order_id,
+                    'order_number' => $order?->order_number,
+                    'order_status' => $order?->status,
+                    'product_id' => $item->product_id,
+                    'product_name' => $item->product_name,
+                    'product_code' => $item->product_code,
+                    'barcode' => $item->barcode,
+                    'image' => $item->image,
+                    'quantity' => $item->quantity,
+                    'unit_price' => (float) $item->unit_price,
+                    'status' => $item->status,
+                    'is_installable' => (bool) $item->is_installable,
+                    'is_flagged' => (bool) $item->is_flagged,
+                    'flag_reason' => $item->flag_reason,
+                    'picked_by' => $item->picked_by ? (int) $item->picked_by : null,
+                    'picked_user_name' => $item->picked_user_name ?: ($item->pickedUser?->name ?? null),
+                    'picked_at' => $item->picked_at ? $item->picked_at->toIso8601String() : null,
+                    'customer' => [
+                        'name' => $order?->customer_name ?? $schedule?->customer_name ?? 'N/A',
+                        'phone' => $order?->customer_phone ?? $schedule?->customer_phone ?? 'N/A',
+                        'delivery_address' => $order?->delivery_address ?? $schedule?->address ?? 'N/A',
+                    ],
+                    'technician_schedule' => $schedule ? [
+                        'id' => $schedule->id,
+                        'schedule_id' => $schedule->id,
+                        'technician_id' => $schedule->technician_id ? (int) $schedule->technician_id : null,
+                        'technician_name' => $schedule->technician_name ?: ($technician?->name ?? 'Unassigned'),
+                        'technician' => $technician ? [
+                            'id' => $technician->id,
+                            'name' => $technician->name,
+                            'email' => $technician->email,
+                            'phone' => $technician->phone,
+                            'status' => $technician->status,
+                        ] : null,
+                        'scheduled_date' => $scheduledDateStr,
+                        'start_time' => $schedule->start_time,
+                        'end_time' => $schedule->end_time,
+                        'taken_time_in_mins' => (int) ($schedule->taken_time_in_mins ?? 0),
+                        'status' => $schedule->status,
+                        'notes' => $schedule->notes,
+                        'zone' => $schedule->zone,
+                        'address' => $schedule->address,
+                    ] : null,
+                    'installation' => $installation ? [
+                        'id' => $installation->id,
+                        'installation_type' => $installation->installation_type,
+                        'installation_level' => $installation->installation_level,
+                        'is_scheduled_assigned' => (bool) $installation->is_scheduled_assigned,
+                        'status' => $installation->status,
+                    ] : null,
+                    'created_at' => $item->created_at ? $item->created_at->toIso8601String() : null,
+                    'updated_at' => $item->updated_at ? $item->updated_at->toIso8601String() : null,
+                ];
+            };
+
+            if ($isAll) {
+                $items = $query->get();
+                $formattedItems = $items->map($formatItem)->values();
+
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Main warehouse picked installation items retrieved successfully.',
+                    'total' => $formattedItems->count(),
+                    'data' => $formattedItems,
+                ], 200);
+            }
+
+            $paginator = $query->paginate($perPage);
+            $formattedItems = collect($paginator->items())->map($formatItem)->values();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Main warehouse picked installation items retrieved successfully.',
+                'pagination' => [
+                    'current_page' => $paginator->currentPage(),
+                    'per_page' => $paginator->perPage(),
+                    'total' => $paginator->total(),
+                    'last_page' => $paginator->lastPage(),
+                    'has_more_pages' => $paginator->hasMorePages(),
+                ],
+                'data' => $formattedItems,
+            ], 200);
+
+        } catch (\Throwable $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to retrieve main warehouse picked installation items: ' . $e->getMessage(),
+                'data' => [],
+            ], 500);
+        }
+    }
 }

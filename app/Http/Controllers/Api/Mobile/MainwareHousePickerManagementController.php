@@ -24,6 +24,426 @@ class MainwareHousePickerManagementController extends Controller
      */
  
 
+    public function installationOrdersPicker(Request $request): JsonResponse
+    {
+        try {
+            // Optional silent sync with Shopify
+            if (
+                $request->boolean('auto_sync', false) &&
+                !empty($this->shopifyService)
+            ) {
+                try {
+                    $this->shopifyService->syncOrdersToDatabase();
+                } catch (\Throwable $syncEx) {
+                    Log::warning(
+                        'Silent Shopify sync failed in installationOrdersPicker: ' .
+                        $syncEx->getMessage()
+                    );
+                }
+            }
+
+            // Resolve target date; default to today
+            $today = Carbon::today()->toDateString();
+
+            $targetDateInput = $request->input('scheduled_date')
+                ?? $request->input('date')
+                ?? $request->query('scheduled_date')
+                ?? $request->query('date')
+                ?? $today;
+
+            try {
+                $targetDate = Carbon::parse($targetDateInput)->toDateString();
+            } catch (\Throwable $e) {
+                $targetDate = $today;
+            }
+
+            // Base query and required relationships
+            $query = Order::query()->with([
+                'items' => function ($iq) {
+                    $iq->with([
+                        'installation',
+                        'technicianSchedule',
+                        'technicianSchedules',
+                        'flagImages',
+                    ]);
+                },
+                'technicianSchedules',
+                'assignedUser',
+            ]);
+
+            // Find orders scheduled for the target date
+            $query->where(function ($q) use ($targetDate) {
+                // Order-level technician schedule
+                $q->whereHas('technicianSchedules', function ($tq) use ($targetDate) {
+                    $tq->where(function ($sub) use ($targetDate) {
+                        $sub->whereDate('scheduled_date', $targetDate)
+                            ->orWhereDate('scheduled_at', $targetDate);
+                    })->where('status', '!=', 'cancelled');
+                })
+
+                // Item-level technician schedules
+                ->orWhereHas('items', function ($iq) use ($targetDate) {
+                    $iq->whereHas('technicianSchedule', function ($tq) use ($targetDate) {
+                        $tq->where(function ($sub) use ($targetDate) {
+                            $sub->whereDate('scheduled_date', $targetDate)
+                                ->orWhereDate('scheduled_at', $targetDate);
+                        })->where('status', '!=', 'cancelled');
+                    })
+
+                    ->orWhereHas('technicianSchedules', function ($tq) use ($targetDate) {
+                        $tq->where(function ($sub) use ($targetDate) {
+                            $sub->whereDate('scheduled_date', $targetDate)
+                                ->orWhereDate('scheduled_at', $targetDate);
+                        })->where('status', '!=', 'cancelled');
+                    })
+
+                    ->orWhereHas('installation.technicianSchedule', function ($tq) use ($targetDate) {
+                        $tq->where(function ($sub) use ($targetDate) {
+                            $sub->whereDate('scheduled_date', $targetDate)
+                                ->orWhereDate('scheduled_at', $targetDate);
+                        })->where('status', '!=', 'cancelled');
+                    });
+                });
+
+                // Fallback: orders.scheduled_date
+                if (Schema::hasColumn('orders', 'scheduled_date')) {
+                    $q->orWhere(function ($oq) use ($targetDate) {
+                        $oq->whereDate('scheduled_date', $targetDate)
+                            ->where(function ($sub) {
+                                $sub->where('status', 'like', '%install%')
+                                    ->orWhereHas('items', function ($iq) {
+                                        $iq->where('is_installable', true);
+                                    });
+                            });
+                    });
+                }
+
+                // Fallback: order_installations.scheduled_date
+                if (
+                    Schema::hasTable('order_installations') &&
+                    Schema::hasColumn('order_installations', 'scheduled_date')
+                ) {
+                    $q->orWhereHas('items.installation', function ($instQ) use ($targetDate) {
+                        $instQ->whereDate('scheduled_date', $targetDate);
+                    });
+                }
+            });
+
+            // Exclude cancelled orders by default
+            if (
+                !$request->filled('status') ||
+                strtolower((string) $request->input('status')) !== 'cancelled'
+            ) {
+                $query->where(function ($q) {
+                    $q->whereNull('cancelled_at')
+                        ->whereNotIn('status', [
+                            'cancelled',
+                            'delivery_cancelled',
+                            'failed',
+                        ]);
+                });
+            }
+
+            // Search filter
+            if ($request->filled('search') || $request->filled('q')) {
+                $search = trim(
+                    (string) ($request->input('search') ?? $request->input('q'))
+                );
+
+                $cleanSearch = ltrim($search, '#');
+
+                $query->where(function ($q) use ($search, $cleanSearch) {
+                    $q->where('order_number', 'like', "%{$search}%")
+                        ->orWhere('order_number', 'like', "%{$cleanSearch}%")
+                        ->orWhere('customer_name', 'like', "%{$search}%")
+                        ->orWhere('customer_phone', 'like', "%{$search}%")
+                        ->orWhere('delivery_address', 'like', "%{$search}%")
+                        ->orWhereHas('items', function ($iq) use ($search) {
+                            $iq->where('product_name', 'like', "%{$search}%")
+                                ->orWhere('product_code', 'like', "%{$search}%")
+                                ->orWhere('barcode', 'like', "%{$search}%");
+                        });
+                });
+            }
+
+            // Assigned picker filter
+            if (
+                $request->filled('assigned_to') ||
+                $request->filled('picker_id') ||
+                $request->filled('user_id')
+            ) {
+                $assignedTo = $request->input('assigned_to')
+                    ?? $request->input('picker_id')
+                    ?? $request->input('user_id');
+
+                $query->where(function ($q) use ($assignedTo) {
+                    $q->where('assigned_to', $assignedTo)
+                        ->orWhereHas('items', function ($iq) use ($assignedTo) {
+                            $iq->where('assigned_to', $assignedTo);
+                        });
+                });
+            }
+
+            // Status filter
+            if (
+                $request->filled('status') &&
+                strtolower((string) $request->input('status')) !== 'all'
+            ) {
+                $query->where('status', $request->input('status'));
+            }
+
+            // Flag image URL configuration
+            $configuredBase = env(
+                'FLAG_IMAGES_BASE_URL',
+                env('PUBLIC_BASE_URL')
+            );
+
+            if (!$configuredBase) {
+                $appUrl = config('app.url', 'http://localhost');
+
+                if (
+                    !empty($appUrl) &&
+                    !str_contains($appUrl, 'localhost') &&
+                    !str_contains($appUrl, '127.0.0.1')
+                ) {
+                    $configuredBase = rtrim($appUrl, '/') . '/public';
+                } else {
+                    $configuredBase = 'https://delivery-management.hmws.qatar123.com/public';
+                }
+            }
+
+            $storageBaseUrl = rtrim($configuredBase, '/');
+
+            $formatFlagImageUrl = function (?string $rawUrl) use ($storageBaseUrl): ?string {
+                if (empty($rawUrl)) {
+                    return null;
+                }
+
+                $rawUrl = trim($rawUrl);
+
+                if (str_starts_with($rawUrl, $storageBaseUrl)) {
+                    return $rawUrl;
+                }
+
+                if (
+                    preg_match(
+                        '#(?:https?://[^/]+)?(?:/public)?(/storage/.+)$#i',
+                        $rawUrl,
+                        $matches
+                    )
+                ) {
+                    return $storageBaseUrl . $matches[1];
+                }
+
+                return $rawUrl;
+            };
+
+            // Pagination
+            $isAll = $request->boolean('all')
+                || $request->query('paginate') === 'false';
+
+            $perPage = (int) (
+                $request->input('per_page')
+                ?? $request->query('per_page', 15)
+            );
+
+            $perPage = max(1, min($perPage, 100));
+
+            if ($isAll) {
+                $ordersCollection = $query
+                    ->orderBy('created_at', 'desc')
+                    ->get();
+
+                $paginator = null;
+            } else {
+                $paginator = $query
+                    ->orderBy('created_at', 'desc')
+                    ->paginate($perPage);
+
+                $ordersCollection = collect($paginator->items());
+            }
+
+            // Format orders and return installation items only
+            $formattedOrders = $ordersCollection
+                ->map(function (Order $order) use (
+                    $targetDate,
+                    $formatFlagImageUrl
+                ) {
+                    // Find the order-level schedule for the target date
+                    $orderSchedule = $order->technicianSchedules->first(
+                        function ($schedule) use ($targetDate) {
+                            return $schedule->scheduled_date &&
+                                Carbon::parse(
+                                    $schedule->scheduled_date
+                                )->toDateString() === $targetDate;
+                        }
+                    ) ?? $order->technicianSchedules->first();
+
+                    // Format installation items
+                    $installationItems = $order->items
+                        ->map(function (OrderItem $item) use (
+                            $targetDate,
+                            $orderSchedule,
+                            $formatFlagImageUrl
+                        ) {
+                            $installation = $item->installation;
+
+                            // Find the item schedule for the target date
+                            $itemSchedule = $item->technicianSchedules->first(
+                                function ($schedule) use ($targetDate) {
+                                    return $schedule->scheduled_date &&
+                                        Carbon::parse(
+                                            $schedule->scheduled_date
+                                        )->toDateString() === $targetDate;
+                                }
+                            ) ?? $item->technicianSchedule
+                                ?? $installation?->technicianSchedule;
+
+                            // An item is installable if it has an installation
+                            // flag, installation record, or item schedule
+                            $isInstallable = (bool) (
+                                $item->is_installable ||
+                                $installation ||
+                                $item->technicianSchedule ||
+                                $item->technicianSchedules->isNotEmpty()
+                            );
+
+                            if (!$isInstallable) {
+                                return null;
+                            }
+
+                            // Use item schedule, falling back to order schedule
+                            $displaySchedule = $itemSchedule ?? $orderSchedule;
+
+                            // Format scheduled date
+                            $scheduledDate = $displaySchedule?->scheduled_date
+                                ? Carbon::parse(
+                                    $displaySchedule->scheduled_date
+                                )->toDateString()
+                                : $targetDate;
+
+                            // Flag image
+                            $flagImageUrl = null;
+
+                            if ($item->is_flagged) {
+                                $firstFlagImg = $item->flagImages->first();
+
+                                $rawUrl = $firstFlagImg
+                                    ? (
+                                        $firstFlagImg->image_url
+                                        ?? $firstFlagImg->photo_url
+                                    )
+                                    : null;
+
+                                $flagImageUrl = $formatFlagImageUrl($rawUrl);
+                            }
+
+                            // Product tag: return VS only when present
+                            $productTag = collect(
+                                explode(',', $item->product_tags ?? '')
+                            )
+                                ->map(fn ($tag) => trim($tag))
+                                ->contains(
+                                    fn ($tag) => strcasecmp($tag, 'VS') === 0
+                                )
+                                ? 'VS'
+                                : null;
+
+                            // Return only the required item fields
+                            return [
+                                'line_item_id' => $item->line_item_id,
+                                'product_id' => $item->product_id,
+                                'product_name' => $item->product_name,
+                                'sku' => $item->sku ?? $item->product_code,
+                                'product_code' => $item->product_code ?? $item->sku,
+                                'barcode' => $item->barcode,
+                                'quantity' => (int) $item->quantity,
+                                'rack' => $item->rack,
+                                'bin' => $item->bin,
+
+                                'imageUrl' => $item->image
+                                    ?? $item->imageUrl
+                                    ?? $item->image_url,
+
+                                'product_tag' => $productTag,
+                                'status' => $item->status,
+                                'is_assigned' => !is_null($item->assigned_to),
+                                'is_flagged' => (bool) $item->is_flagged,
+                                'flag_reason' => $item->flag_reason,
+                                'flag_image' => $flagImageUrl,
+
+                                'scheduled_date' => $scheduledDate,
+                                'start_time' => $displaySchedule?->start_time,
+                                'end_time' => $displaySchedule?->end_time,
+                            ];
+                        })
+                        ->filter()
+                        ->values();
+
+                    // Order schedule date and times
+                    $scheduledDate = $orderSchedule?->scheduled_date
+                        ? Carbon::parse(
+                            $orderSchedule->scheduled_date
+                        )->toDateString()
+                        : $targetDate;
+
+                    // Return only the required order fields
+                    return [
+                        'order_number' => $order->order_number,
+                        'status' => $order->status,
+                        'scheduled_date' => $scheduledDate,
+                        'start_time' => $orderSchedule?->start_time,
+                        'end_time' => $orderSchedule?->end_time,
+                        'items_count' => $installationItems->count(),
+                        'items' => $installationItems,
+                    ];
+                })
+                // Avoid returning orders with no installation items
+                ->filter(fn ($order) => $order['items_count'] > 0)
+                ->values();
+
+            // Minimal response structure
+            $response = [
+                'success' => true,
+                'status' => 'success',
+                'message' => 'Today scheduled installation orders retrieved successfully.',
+                'date' => $targetDate,
+                'data' => $formattedOrders,
+                'count' => $formattedOrders->count(),
+            ];
+
+            // Preserve pagination fields
+            if ($paginator) {
+                $response['pagination'] = [
+                    'current_page' => $paginator->currentPage(),
+                    'per_page' => $paginator->perPage(),
+                    'total' => $paginator->total(),
+                    'last_page' => $paginator->lastPage(),
+                    'has_more_pages' => $paginator->hasMorePages(),
+                ];
+            }
+
+            return response()->json($response, 200);
+
+        } catch (\Throwable $e) {
+            Log::error(
+                'Error in PickerManagementController@installationOrdersPicker: ' .
+                $e->getMessage(),
+                [
+                    'trace' => $e->getTraceAsString(),
+                ]
+            );
+
+            return response()->json([
+                'success' => false,
+                'status' => 'error',
+                'message' => 'An error occurred while retrieving scheduled installation orders: ' .
+                    $e->getMessage(),
+                'data' => [],
+            ], 500);
+        }
+    }
+
     public function assignInstallationOrdersToPicker(Request $request): JsonResponse
     {
         $picker = null;

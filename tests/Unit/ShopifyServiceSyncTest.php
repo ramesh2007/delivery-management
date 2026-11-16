@@ -156,4 +156,34 @@ class ShopifyServiceSyncTest extends TestCase
         $this->assertEquals(1, OrderItem::count());
         $this->assertEquals('Test Item Cleaned', OrderItem::first()->product_name);
     }
+
+    public function test_barcode_is_not_defaulted_to_sku_when_missing(): void
+    {
+        $payload = [
+            'id' => 584938493846,
+            'order_number' => 1004,
+            'name' => '#1004',
+            'line_items' => [
+                [
+                    'id' => 9006,
+                    'variant_id' => 48933680939252,
+                    'product_id' => 9567067209972,
+                    'sku' => '10043',
+                    'title' => 'Butterfly Nail Polish',
+                    'quantity' => 1,
+                    'price' => '49.00',
+                ],
+            ],
+        ];
+
+        // Seed cache for variant barcode
+        \Illuminate\Support\Facades\Cache::put('shopify_var_barcode_48933680939252', '638241100434', now()->addDays(1));
+
+        $order = $this->shopifyService->processSingleOrderPayload($payload);
+        $item = $order->items->first();
+
+        $this->assertEquals('10043', $item->product_code);
+        $this->assertEquals('638241100434', $item->barcode);
+        $this->assertNotEquals($item->product_code, $item->barcode);
+    }
 }

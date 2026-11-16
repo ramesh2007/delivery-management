@@ -48,5 +48,30 @@ return [
         'base_url' => env('ERPNEXT_BASE_URL', 'https://halamama.rakonex.cc'),
         'login_endpoint' => env('ERPNEXT_LOGIN_ENDPOINT', '/api/method/warehouse_management.api.login.mobile_login'),
     ],
+    'whatsapp' => [
+        'api_version' => env('WHATSAPP_API_VERSION', 'v26.0'),
+        'phone_number_id' => env('WHATSAPP_PHONE_NUMBER_ID'),
+        'business_account_id' => env('WHATSAPP_WABA_ID'),
+        'access_token' => env('WHATSAPP_TOKEN'),
+        'app_secret' => env('META_APP_SECRET'),
+        'verify_token' => env('WHATSAPP_VERIFY_TOKEN'),
+    ],
+
+    'facebook' => [
+        'api_version' => env('FACEBOOK_API_VERSION', 'v21.0'),
+        'app_id' => env('FACEBOOK_APP_ID'),
+        'app_secret' => env('FACEBOOK_APP_SECRET', env('META_APP_SECRET')),
+        'page_id' => env('FACEBOOK_PAGE_ID'),
+        'page_access_token' => env('FACEBOOK_PAGE_ACCESS_TOKEN'),
+        'verify_token' => env('FACEBOOK_MESSENGER_VERIFY_TOKEN', env('WHATSAPP_VERIFY_TOKEN')),
+    ],
+
+    'instagram' => [
+        'api_version' => env('INSTAGRAM_API_VERSION', 'v21.0'),
+        'account_id' => env('INSTAGRAM_ACCOUNT_ID'),
+        'access_token' => env('INSTAGRAM_ACCESS_TOKEN', env('FACEBOOK_PAGE_ACCESS_TOKEN')),
+        'app_secret' => env('INSTAGRAM_APP_SECRET', env('META_APP_SECRET')),
+        'verify_token' => env('INSTAGRAM_VERIFY_TOKEN', env('WHATSAPP_VERIFY_TOKEN')),
+    ],
 
 ];

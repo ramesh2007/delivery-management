@@ -707,10 +707,10 @@ class ScheduleTechnicianController extends Controller
 
                     $orderInstallation->update($installationStatus);
 
-                    $orderItem->update([
-                        'assigned_to' => $technicianId,
-                        'assigned_user_name' => $technicianName,
-                    ]);
+                    // $orderItem->update([
+                    //     'assigned_to' => $technicianId,
+                    //     'assigned_user_name' => $technicianName,
+                    // ]);
 
                     try {
                         if (class_exists(OrderStatusLog::class)) {
@@ -793,12 +793,12 @@ class ScheduleTechnicianController extends Controller
 
                 $orderInstallation->update($installationStatus);
 
-                if (empty($orderItem->assigned_to)) {
-                    $orderItem->update([
-                        'assigned_to' => $technicianId,
-                        'assigned_user_name' => $technicianName,
-                    ]);
-                }
+                // if (empty($orderItem->assigned_to)) {
+                //     $orderItem->update([
+                //         'assigned_to' => $technicianId,
+                //         'assigned_user_name' => $technicianName,
+                //     ]);
+                // }
 
                 try {
                     if (class_exists(OrderStatusLog::class)) {

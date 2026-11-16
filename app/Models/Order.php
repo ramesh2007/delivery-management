@@ -199,6 +199,14 @@ class Order extends Model
     }
 
     /**
+     * Get the MIS SLA tracking record for this order.
+     */
+    public function sla(): HasOne
+    {
+        return $this->hasOne(MisOrderSla::class, 'order_id');
+    }
+
+    /**
      * Get the payment tracking details for this order.
      */
     public function payment(): HasOne

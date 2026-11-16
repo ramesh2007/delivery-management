@@ -19,7 +19,9 @@ use App\Http\Controllers\Api\Admin\InstallationLevelController;
 use App\Http\Controllers\Api\Admin\FlagController;
 use App\Http\Controllers\Api\Admin\ReturnReplacementController;
 use App\Http\Controllers\Api\Admin\ScheduleTechnicianController;
-
+use App\Http\Controllers\Api\Admin\DeliveryScheduleSettingsController;
+use App\Http\Controllers\Api\Admin\DeliverySlaSettingsController;
+use App\Http\Controllers\Api\Admin\DeliveryBenchmarkSettingsController;
 //Mobile App Controllers
 use App\Http\Controllers\Api\OrderManagementController;
 use App\Http\Controllers\Api\Mobile\PackerManagementController;
@@ -28,26 +30,35 @@ use App\Http\Controllers\Api\Mobile\DeliveryManagementController;
 use App\Http\Controllers\Api\Mobile\DiscrepancyController;
 use App\Http\Controllers\Api\Mobile\ScheduledInstallationMobileController;
 use App\Http\Controllers\Api\Mobile\DashboardController;
+use App\Http\Controllers\Api\Mobile\MainwareHousePickerManagementController;
+
+
+//customer care
+use App\Modules\CustomerCare\Controllers\HealthController;
+use App\Modules\CustomerCare\Controllers\WhatsAppWebhookController;
+use App\Modules\CustomerCare\Controllers\WhatsAppTestController;
+use App\Modules\CustomerCare\Controllers\MessengerWebhookController;
+use App\Modules\CustomerCare\Controllers\InstagramWebhookController;
+use App\Modules\CustomerCare\Controllers\ConversationController;
 
 
 Route::post('/login', [AuthController::class, 'login']);
 Route::post('/users', [UserController::class, 'store']); // Public registration
 
 // Top-level aliases for installation & scheduled orders (backwards compatibility)
-Route::match(['get', 'post'], '/orders/status/installation', [OrderStatusApiController::class, 'installationOrders']);
-Route::match(['get', 'post'], '/orders/installation', [OrderStatusApiController::class, 'installationOrders']);
-Route::match(['get', 'post'], '/orders/status/scheduled-items', [ScheduleController::class, 'scheduledItems']);
-Route::match(['get', 'post'], '/orders/scheduled-items', [ScheduleController::class, 'scheduledItems']);
-Route::match(['get', 'post'], '/installation-completed', [ScheduleController::class, 'installationCompleted']);
-Route::match(['get', 'post'], '/orders/status/installation-completed', [ScheduleController::class, 'installationCompleted']);
-Route::match(['get', 'post'], '/orders/installation-completed', [ScheduleController::class, 'installationCompleted']);
-Route::get('/orders', [OrderStatusApiController::class, 'all']);
-Route::get('/order-management/orders/{id}', [OrderManagementController::class, 'show']);
-Route::any('/check-technician-avaliablity', [ScheduleTechnicianController::class, 'checkTechnicianAvaliable']);
-Route::any('/check-technician-availability', [ScheduleTechnicianController::class, 'checkTechnicianAvaliable']);
-Route::match(['get', 'post'], '/technician-schedule/create', [ScheduleTechnicianController::class, 'createSchedule']);
-Route::match(['get', 'post'], '/technician-schedule/reschedule', [ScheduleTechnicianController::class, 'rescheduleSchedule']);
-Route::get('/technician-schedule/list', [ScheduleTechnicianController::class, 'listSchedules']);
+// Route::match(['get', 'post'], '/orders/status/installation', [OrderStatusApiController::class, 'installationOrders']);
+// Route::match(['get', 'post'], '/orders/installation', [OrderStatusApiController::class, 'installationOrders']);
+// Route::match(['get', 'post'], '/orders/status/scheduled-items', [ScheduleController::class, 'scheduledItems']);
+// Route::match(['get', 'post'], '/orders/scheduled-items', [ScheduleController::class, 'scheduledItems']);
+// Route::match(['get', 'post'], '/installation-completed', [ScheduleController::class, 'installationCompleted']);
+// Route::match(['get', 'post'], '/orders/status/installation-completed', [ScheduleController::class, 'installationCompleted']);
+// Route::match(['get', 'post'], '/orders/installation-completed', [ScheduleController::class, 'installationCompleted']);
+// Route::get('/orders', [OrderStatusApiController::class, 'all']);
+// Route::get('/order-management/orders/{id}', [OrderManagementController::class, 'show']);
+// Route::any('/check-technician-avaliablity', [ScheduleTechnicianController::class, 'checkTechnicianAvaliable']);
+// Route::match(['get', 'post'], '/technician-schedule/create', [ScheduleTechnicianController::class, 'createSchedule']);
+// Route::match(['get', 'post'], '/technician-schedule/reschedule', [ScheduleTechnicianController::class, 'rescheduleSchedule']);
+// Route::get('/technician-schedule/list', [ScheduleTechnicianController::class, 'listSchedules']);
 
 //Admin Routes
 Route::prefix('admin')->group(function () {
@@ -129,10 +140,10 @@ Route::prefix('admin')->group(function () {
     Route::match(['get', 'post'], '/orders/status/scheduled-items', [ScheduleController::class, 'scheduledItems']);
     Route::match(['get', 'post'], '/technician-scheduled-list', [ScheduleController::class, 'technicianScheduledList']);
     Route::any('/installation-completed', [ScheduleController::class, 'installationCompleted']);
+    Route::match(['get', 'post'], '/orders/scheduled-items', [ScheduleController::class, 'scheduledItems']);
 
     // Route::match(['get', 'post'], '/orders/status/scheduled', [ScheduleController::class, 'scheduledItems']);
     // Route::match(['get', 'post'], '/orders/status/scheduled-assigned', [ScheduleController::class, 'scheduledItems']);
-    // Route::match(['get', 'post'], '/orders/scheduled-items', [ScheduleController::class, 'scheduledItems']);
     // Route::match(['get', 'post'], '/schedule/items', [ScheduleController::class, 'scheduledItems']);
     // Route::match(['get', 'post'], '/schedule/assigned-items', [ScheduleController::class, 'scheduledItems']);
 
@@ -140,7 +151,7 @@ Route::prefix('admin')->group(function () {
 
     Route::match(['get', 'post'], '/scheduled-installation', [ScheduledInstallationController::class, 'store']);
     Route::get('/scheduled-installation/list', [ScheduledInstallationController::class, 'index']);
-
+    Route::get('/installation-itmes/main-warehouse-picked',[ScheduledInstallationController::class,'mainwarehousePicked']);
     // Installation Level - Locations & Teams (Technicians)
     Route::get('/installation/locations', [InstallationLevelController::class, 'locations']);
     Route::get('/installation/teams/{LocationId?}', [InstallationLevelController::class, 'team']);
@@ -157,7 +168,10 @@ Route::prefix('admin')->group(function () {
     // Create Return / Replacement Endpoint
     Route::post('/orders/return-replacement', [ReturnReplacementController::class, 'createReturnReplacement']);
     Route::get('/orders/get-return-replacements', [ReturnReplacementController::class, 'getReturnReplacements']);
-
+    //Delivery Sla Settings 
+    Route::match(['get', 'post'],'/delivery-schedule-settings', [DeliveryScheduleSettingsController::class, 'createDeliveryScheduleSettings']);
+    Route::match(['get','post'],'/delivery-sla-settings', [DeliverySlaSettingsController::class, 'getDeliverySlaSettings']);
+    Route::match(['get','post'],'/delivery-benchmark-settings',[DeliveryBenchmarkSettingsController::class, 'getDeliveryBenchmarkSettings']);
 });
 
 
@@ -176,7 +190,11 @@ Route::prefix('mobile')->group(function(){
     Route::post('/orders/items/unassign-me', [PickerManagementController::class, 'unassignItems']);
     Route::any('/orders/items/update-status', [PickerManagementController::class, 'updateItemStatus']);
     Route::post('/orders/items/picker/update-status', [PickerManagementController::class, 'pickerupdateItemStatus']);
-
+     //MainwareHousePickerManagementController
+    Route::any('/installation-orders/picker',[MainwareHousePickerManagementController::class, 'installationOrdersPicker']);
+    Route::any('/mainware-house/picker/assign-installation-orders',[MainwareHousePickerManagementController::class, 'assignInstallationOrdersToPicker']);
+    Route::any('/mainware-house/picker/update-status',[MainwareHousePickerManagementController::class, 'updateStatus']);
+    Route::get('/mainware-house/picker/{id}',[MainwareHousePickerManagementController::class, 'getInstallationOrdersByPickerId']);
     // Assign and Unassign Picker with Order Items Array API Endpoints
     Route::post('/orders/assign-picker-items', [PickerManagementController::class, 'assignOrderWithItems']);
     Route::post('/orders/picker/assign-items', [PickerManagementController::class, 'assignOrderWithItems']);
@@ -228,7 +246,7 @@ Route::prefix('mobile')->group(function(){
     Route::post('/orders/driver/cancelled', [DeliveryManagementController::class, 'orderCancelled']);
     Route::post('/orders/driver/refund', [DeliveryManagementController::class, 'orderRefund']);
     Route::post('/orders/driver/exchange', [DeliveryManagementController::class, 'orderExchange']);
-    Route::post('/orders/driver/flag', [DeliveryManagementController::class, 'flagDelivery']);
+   // Route::post('/orders/driver/flag', [DeliveryManagementController::class, 'flagDelivery']);
     Route::post('/orders/driver/flag-delivery', [DeliveryManagementController::class, 'flagDelivery']);
     Route::get('/orders/driver/flagged/{driver_user_id?}', [DeliveryManagementController::class, 'getFlaggedOrders']);
     Route::get('/orders/driver/flagged-orders/{driver_user_id?}', [DeliveryManagementController::class, 'getFlaggedOrders']);
@@ -264,6 +282,7 @@ Route::prefix('mobile')->group(function(){
     Route::match(['get', 'post'], '/packer/dashboard/{packer_id?}', [DashboardController::class, 'packerDashboard']);
     Route::match(['get', 'post'], '/driver/dashboard/{driver_id?}', [DashboardController::class, 'driverDashboard']);
     Route::match(['get', 'post'], '/installer/dashboard/{installer_id?}', [DashboardController::class, 'installationDashboard']);
+    Route::match(['get', 'post'], 'scheduled/markas-delivered', [ScheduledInstallationMobileController::class, 'installationMarkasDelivered']);
     //partially cancelled
     Route::match(['get', 'post'], 'driver/partially-cancelled', [DeliveryManagementController::class, 'PartiallyCancelledOrder']);
     Route::match(['get', 'post'], 'orders/driver/partially-cancelled', [DeliveryManagementController::class, 'PartiallyCancelledOrder']);

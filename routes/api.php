@@ -22,6 +22,7 @@ use App\Http\Controllers\Api\Admin\ScheduleTechnicianController;
 use App\Http\Controllers\Api\Admin\DeliveryScheduleSettingsController;
 use App\Http\Controllers\Api\Admin\DeliverySlaSettingsController;
 use App\Http\Controllers\Api\Admin\DeliveryBenchmarkSettingsController;
+
 //Mobile App Controllers
 use App\Http\Controllers\Api\OrderManagementController;
 use App\Http\Controllers\Api\Mobile\PackerManagementController;
@@ -32,7 +33,6 @@ use App\Http\Controllers\Api\Mobile\ScheduledInstallationMobileController;
 use App\Http\Controllers\Api\Mobile\DashboardController;
 use App\Http\Controllers\Api\Mobile\MainwareHousePickerManagementController;
 
-
 //customer care
 use App\Modules\CustomerCare\Controllers\HealthController;
 use App\Modules\CustomerCare\Controllers\WhatsAppWebhookController;
@@ -41,23 +41,15 @@ use App\Modules\CustomerCare\Controllers\MessengerWebhookController;
 use App\Modules\CustomerCare\Controllers\InstagramWebhookController;
 use App\Modules\CustomerCare\Controllers\ConversationController;
 
+
 Route::post('/login', [AuthController::class, 'login']);
 Route::post('/users', [UserController::class, 'store']); // Public registration
 
 // Top-level aliases for installation & scheduled orders (backwards compatibility)
-// Route::match(['get', 'post'], '/orders/status/installation', [OrderStatusApiController::class, 'installationOrders']);
-// Route::match(['get', 'post'], '/orders/installation', [OrderStatusApiController::class, 'installationOrders']);
-// Route::match(['get', 'post'], '/orders/status/scheduled-items', [ScheduleController::class, 'scheduledItems']);
-// Route::match(['get', 'post'], '/orders/scheduled-items', [ScheduleController::class, 'scheduledItems']);
-// Route::match(['get', 'post'], '/installation-completed', [ScheduleController::class, 'installationCompleted']);
-// Route::match(['get', 'post'], '/orders/status/installation-completed', [ScheduleController::class, 'installationCompleted']);
-// Route::match(['get', 'post'], '/orders/installation-completed', [ScheduleController::class, 'installationCompleted']);
-// Route::get('/orders', [OrderStatusApiController::class, 'all']);
-// Route::get('/order-management/orders/{id}', [OrderManagementController::class, 'show']);
-// Route::any('/check-technician-avaliablity', [ScheduleTechnicianController::class, 'checkTechnicianAvaliable']);
-// Route::match(['get', 'post'], '/technician-schedule/create', [ScheduleTechnicianController::class, 'createSchedule']);
-// Route::match(['get', 'post'], '/technician-schedule/reschedule', [ScheduleTechnicianController::class, 'rescheduleSchedule']);
-// Route::get('/technician-schedule/list', [ScheduleTechnicianController::class, 'listSchedules']);
+Route::match(['get', 'post'], '/orders/status/installation', [OrderStatusApiController::class, 'installationOrders']);
+Route::match(['get', 'post'], '/orders/installation', [OrderStatusApiController::class, 'installationOrders']);
+Route::match(['get', 'post'], '/orders/status/scheduled-items', [ScheduleController::class, 'scheduledItems']);
+Route::match(['get', 'post'], '/orders/scheduled-items', [ScheduleController::class, 'scheduledItems']);
 
 //Admin Routes
 Route::prefix('admin')->group(function(){
@@ -68,7 +60,7 @@ Route::prefix('admin')->group(function(){
     Route::get('/orders/all', [OrderStatusApiController::class, 'all']);
 
     Route::get('/orders/status/new', [OrderStatusApiController::class, 'newOrders']);
-    // Route::get('/orders/new', [OrderStatusApiController::class, 'newOrders']);
+    Route::get('/orders/new', [OrderStatusApiController::class, 'newOrders']);
 
     Route::get('/orders/status/ready-to-assign', [OrderStatusApiController::class, 'readyToAssign']);
     Route::get('/orders/ready-to-assign', [OrderStatusApiController::class, 'readyToAssign']);
@@ -95,8 +87,8 @@ Route::prefix('admin')->group(function(){
     Route::match(['get', 'post'], '/orders/status/cancelled-delivery', [OrderStatusApiController::class, 'cancelledDelivery']);
     Route::match(['get', 'post'], '/orders/cancelled-delivery', [OrderStatusApiController::class, 'cancelledDelivery']);
     Route::get('/orders/status/flagged', [OrderStatusApiController::class, 'flaggedOrders']);
-    // Route::get('/orders/flagged', [OrderStatusApiController::class, 'flaggedOrders']);
-    // Route::get('/orders/flagged-items', [OrderStatusApiController::class, 'flaggedOrders']);
+    Route::get('/orders/flagged', [OrderStatusApiController::class, 'flaggedOrders']);
+    Route::get('/orders/flagged-items', [OrderStatusApiController::class, 'flaggedOrders']);
 
     //driver assignment endpoints
     Route::post('/driver/assign', [DriverManagementController::class, 'assignDriver']);
@@ -105,18 +97,6 @@ Route::prefix('admin')->group(function(){
     // Driver Management & Order Assignment Endpoints (React.js Frontend & Flutter App)
     Route::get('/get-drivers-list', [DriverManagementController::class, 'index']);
     Route::get('/drivers', [DriverManagementController::class, 'index']);
-
-    //Pickers 
-    Route::get('/get-pickers-list', [PickerAdminController::class, 'getPickersList']);
-    Route::any('/assign-items-by-picker', [PickerAdminController::class, 'assignItemsByPicker']);
-    Route::any('/orders/unassign-picker-items',[PickerAdminController::class,'unassignItemsByPicker']);
-    Route::any('/orders/assign-order-wise-picker',[PickerAdminController::class,'assignOrderWithItems']);
-    Route::post('/orders/order-wise-picker-unassign', [PickerAdminController::class, 'unassignOrderWithItems']);
-
-    //Packers
-    Route::get('/get-packers-list', [PackerAdminController::class, 'getPackersList']);
-    Route::post('/orders/assign-packer-items', [PackerAdminController::class, 'assignPackerWithItems']);
-
     // Payment Status Update Endpoint
     Route::post('/orders/update-payment-status', [PaymentsManagementController::class, 'updatePaymentStatus']);
     // Create Return / Replacement Endpoint
@@ -125,28 +105,40 @@ Route::prefix('admin')->group(function(){
     // Schedule Endpoints (Assignment & Item-wise Scheduled Listing)
     Route::post('/schedule/assign/{order_item_id?}', [ScheduleController::class, 'assignSchedule']);
     Route::match(['get', 'post'], '/orders/status/scheduled-items', [ScheduleController::class, 'scheduledItems']);
-    Route::match(['get', 'post'], '/technician-scheduled-list', [ScheduleController::class, 'technicianScheduledList']);
-    Route::any('/installation-completed', [ScheduleController::class, 'installationCompleted']);
+    Route::match(['get', 'post'], '/orders/status/scheduled', [ScheduleController::class, 'scheduledItems']);
+    Route::match(['get', 'post'], '/orders/status/scheduled-assigned', [ScheduleController::class, 'scheduledItems']);
     Route::match(['get', 'post'], '/orders/scheduled-items', [ScheduleController::class, 'scheduledItems']);
+    Route::match(['get', 'post'], '/schedule/items', [ScheduleController::class, 'scheduledItems']);
+    Route::match(['get', 'post'], '/schedule/assigned-items', [ScheduleController::class, 'scheduledItems']);
 
-    // Route::match(['get', 'post'], '/orders/status/scheduled', [ScheduleController::class, 'scheduledItems']);
-    // Route::match(['get', 'post'], '/orders/status/scheduled-assigned', [ScheduleController::class, 'scheduledItems']);
-    // Route::match(['get', 'post'], '/schedule/items', [ScheduleController::class, 'scheduledItems']);
-    // Route::match(['get', 'post'], '/schedule/assigned-items', [ScheduleController::class, 'scheduledItems']);
+    //Pickers 
+    Route::get('/get-pickers-list', [PickerAdminController::class, 'getPickersList']);
+    Route::any('/assign-items-by-picker', [PickerAdminController::class, 'assignItemsByPicker']);
+    Route::any('orders/unassign-picker-items',[PickerAdminController::class,'unassignItemsByPicker']);
+    Route::post('/orders/order-wise-picker-unassign', [PickerAdminController::class, 'unassignOrderWithItems']);
 
+    //Packers
+    Route::get('/get-packers-list', [PackerAdminController::class, 'getPackersList']);
+    Route::post('/orders/assign-packer-items', [PackerAdminController::class, 'assignPackerWithItems']);
+ 
     // Scheduled and Installation Controller
 
     Route::match(['get', 'post'], '/scheduled-installation', [ScheduledInstallationController::class, 'store']);
     Route::get('/scheduled-installation/list', [ScheduledInstallationController::class, 'index']);
+    Route::match(['get', 'post'], '/technician-scheduled-list', [ScheduleController::class, 'technicianScheduledList']);
+    Route::any('/installation-completed', [ScheduleController::class, 'installationCompleted']);
     Route::get('/installation-itmes/main-warehouse-picked',[ScheduledInstallationController::class,'mainwarehousePicked']);
+    Route::match(['get', 'post'], '/orders/scheduled-items', [ScheduleController::class, 'scheduledItems']);
+
     // Installation Level - Locations & Teams (Technicians)
     Route::get('/installation/locations', [InstallationLevelController::class, 'locations']);
     Route::get('/installation/teams/{LocationId?}', [InstallationLevelController::class, 'team']);
     Route::any('/check-technician-avaliablity', [ScheduleTechnicianController::class, 'checkTechnicianAvaliable']);
     Route::match(['get', 'post'], '/technician-schedule/create', [ScheduleTechnicianController::class, 'createSchedule']);
     Route::match(['get', 'post'], '/technician-schedule/reschedule', [ScheduleTechnicianController::class, 'rescheduleSchedule']);
-    Route::match(['get', 'post'], '/technician-schedule/list', [ScheduleController::class, 'technicianScheduledList']);
+    Route::get('/technician-schedule/list', [ScheduleTechnicianController::class, 'listSchedules']);
     Route::get('/technician-schedule/history', [ScheduleTechnicianController::class, 'scheduleHistory']);
+
 
     // Flagged Orders Management Endpoints
 
@@ -159,6 +151,7 @@ Route::prefix('admin')->group(function(){
     Route::match(['get', 'post'],'/delivery-schedule-settings', [DeliveryScheduleSettingsController::class, 'createDeliveryScheduleSettings']);
     Route::match(['get','post'],'/delivery-sla-settings', [DeliverySlaSettingsController::class, 'getDeliverySlaSettings']);
     Route::match(['get','post'],'/delivery-benchmark-settings',[DeliveryBenchmarkSettingsController::class, 'getDeliveryBenchmarkSettings']);
+
 });
 
 
@@ -177,7 +170,7 @@ Route::prefix('mobile')->group(function(){
     Route::post('/orders/items/unassign-me', [PickerManagementController::class, 'unassignItems']);
     Route::any('/orders/items/update-status', [PickerManagementController::class, 'updateItemStatus']);
     Route::post('/orders/items/picker/update-status', [PickerManagementController::class, 'pickerupdateItemStatus']);
-     //MainwareHousePickerManagementController
+    //MainwareHousePickerManagementController
     Route::any('/installation-orders/picker',[MainwareHousePickerManagementController::class, 'installationOrdersPicker']);
     Route::any('/mainware-house/picker/assign-installation-orders',[MainwareHousePickerManagementController::class, 'assignInstallationOrdersToPicker']);
     Route::any('/mainware-house/picker/update-status',[MainwareHousePickerManagementController::class, 'updateStatus']);
@@ -187,10 +180,14 @@ Route::prefix('mobile')->group(function(){
     Route::post('/orders/picker/assign-items', [PickerManagementController::class, 'assignOrderWithItems']);
     Route::post('/orders/assign-with-items', [PickerManagementController::class, 'assignOrderWithItems']);
 
+    Route::post('/orders/unassign-picker-items', [PickerManagementController::class, 'unassignOrderWithItems']);
+    Route::post('/orders/picker/unassign-items', [PickerManagementController::class, 'unassignOrderWithItems']);
+    Route::post('/orders/unassign-with-items', [PickerManagementController::class, 'unassignOrderWithItems']);
+
     // Packer Workflow API Endpoints (Assignment, Barcode Verification, Bag Count & Order Lists)
     Route::get('/orders/packer/ready-to-pack', [PackerManagementController::class, 'getPickedOrdersForPacker']);
-    // Route::get('/orders/packer/picked/{user_id?}', [PackerManagementController::class, 'getPickedOrdersForPacker']);
-    // Route::get('/orders-picked/{id?}', [PackerManagementController::class, 'getPickedOrdersForPacker']);
+    Route::get('/orders/packer/picked/{user_id?}', [PackerManagementController::class, 'getPickedOrdersForPacker']);
+    Route::get('/orders-picked/{id?}', [PackerManagementController::class, 'getPickedOrdersForPacker']);
 
     Route::get('/orders/packer/packed/{user_id?}', [PackerManagementController::class, 'getPackedOrders']);
     Route::get('/orders-packed/{id?}', [PackerManagementController::class, 'getPackedOrders']);
@@ -203,7 +200,6 @@ Route::prefix('mobile')->group(function(){
     Route::post('/orders/packer/assign', [PackerManagementController::class, 'assignPacker']);
     Route::post('/orders/packer/unassign-me', [PackerManagementController::class, 'unassignPacker']);
     Route::post('/orders/packer/unassign', [PackerManagementController::class, 'unassignPacker']);
-
 
     Route::post('/orders/unassign-packer-items', [PackerManagementController::class, 'unassignPackerWithItems']);
     Route::post('/orders/packer/unassign-items', [PackerManagementController::class, 'unassignPackerWithItems']);
@@ -233,7 +229,7 @@ Route::prefix('mobile')->group(function(){
     Route::post('/orders/driver/cancelled', [DeliveryManagementController::class, 'orderCancelled']);
     Route::post('/orders/driver/refund', [DeliveryManagementController::class, 'orderRefund']);
     Route::post('/orders/driver/exchange', [DeliveryManagementController::class, 'orderExchange']);
-   // Route::post('/orders/driver/flag', [DeliveryManagementController::class, 'flagDelivery']);
+    Route::post('/orders/driver/flag', [DeliveryManagementController::class, 'flagDelivery']);
     Route::post('/orders/driver/flag-delivery', [DeliveryManagementController::class, 'flagDelivery']);
     Route::get('/orders/driver/flagged/{driver_user_id?}', [DeliveryManagementController::class, 'getFlaggedOrders']);
     Route::get('/orders/driver/flagged-orders/{driver_user_id?}', [DeliveryManagementController::class, 'getFlaggedOrders']);
@@ -256,21 +252,26 @@ Route::prefix('mobile')->group(function(){
     // Flutter App API to update driver status (assigned, accepted, started, delivered, cancelled, refund, exchange)
     Route::post('/driver/update-status', [DeliveryManagementController::class, 'updateDriverStatus']);
     Route::post('/driver-orders/update-status', [DeliveryManagementController::class, 'updateDriverStatus']);
-    //schedule installation
+    
+    // Scheduled installations
     Route::match(['get', 'post'], 'scheduled/get/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getScheduledInstallationByInstallerUserId']);
     Route::match(['get', 'post'], 'scheduled/in-progress/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getInProgressInstallationsByInstallerUserId']);
     Route::match(['get', 'post'], 'scheduled/inprogress/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getInProgressInstallationsByInstallerUserId']);
     Route::match(['get', 'post'], 'scheduled/completed/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getCompletedInstallationsByInstallerUserId']);
+    Route::post('scheduled/assign', [ScheduledInstallationMobileController::class, 'assignInstaller']);
     Route::match(['get', 'post'], 'scheduled/update-status/{id?}', [ScheduledInstallationMobileController::class, 'updateStatus']);
     Route::match(['get', 'post'], 'scheduled/installed-proof-upload', [ScheduledInstallationMobileController::class, 'InstalledProofimageupload']);
-    Route::match(['get', 'post'], 'scheduled/installed-proof-upload', [ScheduledInstallationMobileController::class, 'InstalledProofimageupload']);
+    Route::match(['get', 'post'], 'scheduled/start-installation', [ScheduledInstallationMobileController::class, 'startInstallation']);
+    Route::match(['get', 'post'], 'scheduled/started/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getStartedInstallationList']);
+    Route::match(['get', 'post'], 'scheduled/flag-order', [ScheduledInstallationMobileController::class, 'flagInstallation']);
+    Route::match(['get', 'post'], 'scheduled/flagged/{installer_userid?}', [ScheduledInstallationMobileController::class, 'getFlaggedInstallations']);
+    Route::match(['get', 'post'], 'scheduled/markas-delivered', [ScheduledInstallationMobileController::class, 'installationMarkasDelivered']);
     //Mobile Dashboard Endpoints
     Route::match(['get', 'post'], '/picker/dashboard/{picker_id?}', [DashboardController::class, 'pickerDashboard']);
     Route::match(['get', 'post'], '/packer/dashboard/{packer_id?}', [DashboardController::class, 'packerDashboard']);
     Route::match(['get', 'post'], '/driver/dashboard/{driver_id?}', [DashboardController::class, 'driverDashboard']);
     Route::match(['get', 'post'], '/installer/dashboard/{installer_id?}', [DashboardController::class, 'installationDashboard']);
-    Route::match(['get', 'post'], 'scheduled/markas-delivered', [ScheduledInstallationMobileController::class, 'installationMarkasDelivered']);
-    //partially cancelled
+    
     Route::match(['get', 'post'], 'driver/partially-cancelled', [DeliveryManagementController::class, 'PartiallyCancelledOrder']);
     Route::match(['get', 'post'], 'orders/driver/partially-cancelled', [DeliveryManagementController::class, 'PartiallyCancelledOrder']);
 });
@@ -352,8 +353,8 @@ Route::get('/admin/order/{order}', [\App\Http\Controllers\Api\ResourceController
     ->where('order', '.*');
 Route::get('/order-details/{order}', [\App\Http\Controllers\Api\ResourceController::class, 'salesOrderDetail'])
     ->where('order', '.*');
-
-    /*
+    
+/*
 |--------------------------------------------------------------------------
 | Customer Care Module Routes
 |--------------------------------------------------------------------------
@@ -364,12 +365,11 @@ Route::prefix('customer-care')->group(function () {
     Route::get('/health', [HealthController::class,'index']);
     Route::prefix('whatsapp')->group(function () {
         Route::get('/webhook', [WhatsAppWebhookController::class, 'verify']);
-        Route::get('/webhook/logs', [WhatsAppWebhookController::class, 'logs']);
         Route::post('/webhook', [WhatsAppWebhookController::class, 'receive']);
+        Route::get('/webhook/logs', [WhatsAppWebhookController::class, 'logs']);
         Route::post('/test-send', [WhatsAppTestController::class, 'send']);
     });
-
-    Route::prefix('messenger')->group(function () {
+        Route::prefix('messenger')->group(function () {
         Route::get('/webhook', [MessengerWebhookController::class, 'verify']);
         Route::get('/webhook/logs', [MessengerWebhookController::class, 'logs']);
         Route::post('/webhook', [MessengerWebhookController::class, 'receive']);
@@ -380,7 +380,7 @@ Route::prefix('customer-care')->group(function () {
         Route::get('/webhook/logs', [InstagramWebhookController::class, 'logs']);
         Route::post('/webhook', [InstagramWebhookController::class, 'receive']);
     });
-
+    
     // Conversations & Messages (for React.js Customer Care Dashboard)
     Route::prefix('conversations')->group(function () {
         Route::get('/', [ConversationController::class, 'index']);

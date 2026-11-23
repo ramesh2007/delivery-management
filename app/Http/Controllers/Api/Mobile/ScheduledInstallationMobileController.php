@@ -10,6 +10,8 @@ use App\Models\OrderItem;
 use App\Models\OrderItemDiscrepancy;
 use App\Models\FlagImage;
 use App\Models\OrderInstallation;
+use App\Models\OrderPayment;
+use App\Models\OrderDriverAssigned;
 use App\Models\OrderStatusLog;
 use App\Models\TechnicianScheduled;
 use App\Models\User;
@@ -1510,7 +1512,8 @@ class ScheduledInstallationMobileController extends Controller
                                             'status' => 'completed',
                                             'action' => 'installation_completed',
                                         ]);
-                                    } catch (\Throwable $e) {}
+                                    } catch (\Throwable $e) {
+                                    }
                                 });
                             }
                         }
@@ -1530,7 +1533,8 @@ class ScheduledInstallationMobileController extends Controller
                                     'status' => $order->status,
                                     'action' => 'installation_completed',
                                 ]);
-                            } catch (\Throwable $e) {}
+                            } catch (\Throwable $e) {
+                            }
                         });
                     }
 
@@ -2015,7 +2019,8 @@ class ScheduledInstallationMobileController extends Controller
                             'delivered_by' => $instUser,
                             'action' => 'installation_completed',
                         ]);
-                    } catch (\Throwable $e) {}
+                    } catch (\Throwable $e) {
+                    }
                 });
             }
 
@@ -2112,8 +2117,10 @@ class ScheduledInstallationMobileController extends Controller
                     if ($trimmed === '') {
                         return;
                     }
-                    if ((str_starts_with($trimmed, '[') && str_ends_with($trimmed, ']')) ||
-                        (str_starts_with($trimmed, '{') && str_ends_with($trimmed, '}'))) {
+                    if (
+                        (str_starts_with($trimmed, '[') && str_ends_with($trimmed, ']')) ||
+                        (str_starts_with($trimmed, '{') && str_ends_with($trimmed, '}'))
+                    ) {
                         $inner = json_decode($trimmed, true);
                         if (is_array($inner)) {
                             $collectItems($inner);
@@ -2915,7 +2922,8 @@ class ScheduledInstallationMobileController extends Controller
                             'user_id' => $installerUserId,
                             'user_name' => $installerUserName,
                         ]);
-                    } catch (\Throwable $e) {}
+                    } catch (\Throwable $e) {
+                    }
                 }
 
                 // 3. Mark items as flagged in order_items table
@@ -3132,6 +3140,7 @@ class ScheduledInstallationMobileController extends Controller
             ], 500);
         }
     }
+
     /**
      * Mark an installed order as delivered with collected amount, payment method, and payment status.
      *

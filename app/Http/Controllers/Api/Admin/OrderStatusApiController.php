@@ -633,7 +633,7 @@ class OrderStatusApiController extends Controller
     
                 'status' => $order->status,
     
-                'financial_status' => $order->financial_status,
+                'payment_status' => $order->payment_status,
     
                 'total_price' => $order->total_price,
     
